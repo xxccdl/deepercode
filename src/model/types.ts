@@ -82,6 +82,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { command: '/analyze [路径]', description: '项目架构分析' },
   { command: '/diff <文件>', description: '查看文件变更' },
   { command: '/undo', description: '撤销最近文件修改' },
+  { command: '/delete [name]', description: '删除保存的会话' },
 ];
 
 export type DeepSeekMessage = ChatMessage;

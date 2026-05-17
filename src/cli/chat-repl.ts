@@ -309,6 +309,7 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
         O(G('  /config') + G('    配置管理') + '\n');
         O(G('  /cwd') + G('       当前目录') + '\n');
         O(G('  /export') + G('    导出对话') + '\n');
+        O(G('  /delete [n]') + G(' 删除会话') + '\n');
         O(G('  /init') + G('      初始化项目') + '\n');
         O('\n'); continue;
       }
@@ -331,6 +332,33 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
       if (cmd === '/config') { O(c('配置: deeper config list | deeper config set <key> <value>\n\n')); continue; }
       if (cmd === '/cwd') { O(G(`  ${process.cwd()}\n\n`)); continue; }
       if (cmd === '/export') { await exportHistory(history); continue; }
+      if (cmd === '/delete' || cmd === '/rm') {
+        if (!arg) {
+          if (!existsSync(SESSION_DIR)) { O(r('  无保存的会话\n\n')); continue; }
+          const files = readdirSync(SESSION_DIR).filter(f => f.endsWith('.json') && !f.startsWith('_')).sort().reverse();
+          if (!files.length) { O(r('  无保存的会话\n\n')); continue; }
+          O(b(c('  Sessions')) + G(` · ${files.length} 个`) + '\n');
+          O(G(`  用法: /delete <名称> 删除指定会话\n`));
+          for (let i = 0; i < Math.min(files.length, 15); i++) {
+            const f = files[i];
+            try {
+              const data = JSON.parse(readFileSync(join(SESSION_DIR, f), 'utf-8'));
+              const label = f.replace(/^sess_|\.json$/g, '');
+              O(G(`    ${i + 1}. `) + c(label) + G(` · ${(data.messages?.length || 0)}条 · ${data.savedAt?.slice(0, 16) || '?'}`) + '\n');
+            } catch {}
+          }
+          O('\n'); continue;
+        }
+        const targetFile = join(SESSION_DIR, `sess_${arg}.json`);
+        if (existsSync(targetFile)) {
+          const { unlinkSync: us } = await import('node:fs');
+          us(targetFile);
+          O(g(`已删除: ${arg}\n\n`));
+        } else {
+          O(r(`  会话不存在: ${arg}\n\n`));
+        }
+        continue;
+      }
       if (cmd === '/init') { await initProject(); continue; }
       if (cmd === '/status') { O(B(`▸ API:${GS.api} 工具:${GS.tc} 字符:${GS.ch} · 上下文:${history.length}条`) + '\n\n'); continue; }
       if (cmd === '/mcp') {
@@ -369,7 +397,7 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
         O(c('  /help /clear /quit /save [name] /load|resume [name] /sessions\n'));
         O(c('  /tools [cat] /stats /memory /tasks /model /config /cwd /export /init /mcp /rules\n'));
         O(c('  /plan <任务> /spec <任务> /review <路径> /fix [目标]\n'));
-        O(c('  /commit /analyze [路径] /diff <文件> /undo /status\n\n'));
+        O(c('  /commit /analyze [路径] /diff <文件> /undo /delete [n] /status\n\n'));
         continue;
       }
       if (cmd === '/plan') {
