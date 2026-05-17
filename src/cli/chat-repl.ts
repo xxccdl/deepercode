@@ -1,7 +1,8 @@
 import readline from 'node:readline';
 import process from 'node:process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, copyFileSync, unlinkSync } from 'node:fs';
+import { join, relative } from 'node:path';
+import { execSync } from 'node:child_process';
 import { DEEPER_HOME } from '../core/constants.js';
 import { TOOL_SAFETY_MAP } from '../tools/tool-types.js';
 import type { Tool } from '../tools/tool-types.js';
@@ -12,6 +13,8 @@ import { getTodos, todoSummary } from '../tools/builtin/ai/todo_manager.js';
 import { estimateTokens } from '../tools/builtin/ai/token_count.js';
 import { SkillEngine } from '../skills/SkillEngine.js';
 import { MCPClient } from '../mcp/MCPClient.js';
+import { DeepSeekClient } from '../model/DeepSeekClient.js';
+import type { ChatMessage, StreamChunk } from '../model/types.js';
 import { O, Oflush, A, d, b, c, g, y, r, B, G, resetTimer, thinkingAnim, thinkingAnimAt } from '../ui/ansi.js';
 
 export interface ReplOptions {
@@ -19,12 +22,15 @@ export interface ReplOptions {
   maxTokens: number; temperature: number;
   thinkEnabled: boolean; thinkBudget: number;
 }
+
 type Role = 'system' | 'user' | 'assistant' | 'tool';
+
 interface Message {
   role: Role; content: string | null;
   tool_calls?: Array<{ id: string; name: string; arguments: Record<string, unknown> }>;
   tool_call_id?: string; name?: string; reasoning_content?: string;
 }
+
 interface ToolDef {
   type: 'function';
   function: { name: string; description: string; parameters: Record<string, unknown> };
@@ -36,10 +42,44 @@ const CTX_WARN = 786_432;
 const TOOL_RESULT_MAX = 4000;
 const SESSION_DIR = join(DEEPER_HOME, 'sessions');
 const AUTOSAVE_FILE = join(SESSION_DIR, '_autosave.json');
+
+const TOOL_TIMEOUT_MAP: Record<string, number> = {
+  run_command: 120_000, run_async: 120_000, pipe_commands: 120_000,
+  shell_script: 120_000, build_project: 180_000, run_test: 180_000,
+  npm_manage: 120_000, docker_manage: 120_000, project_init: 120_000,
+  web_fetch: 60_000, web_search: 60_000, http_request: 60_000,
+  browser_action: 60_000, screenshot_page: 60_000,
+  sql_query: 60_000, sql_migrate: 120_000, db_backup: 180_000, db_restore: 180_000,
+  secret_scan: 60_000, vulnerability_check: 60_000,
+  subagent: 180_000,
+};
+const DEFAULT_TOOL_TIMEOUT = 30_000;
+
 let GS = { tc: 0, api: 0, ch: 0 };
 let skillEngine: SkillEngine | null = null;
 let mcpClient: MCPClient | null = null;
 const validator = new ToolValidator();
+let currentAbortController: AbortController | null = null;
+
+const BACKUP_DIR = join(DEEPER_HOME, 'backups');
+const MAX_BACKUPS = 50;
+const fileBackupStack: Array<{ path: string; backupPath: string; timestamp: number }> = [];
+
+function backupFile(filePath: string): void {
+  if (!existsSync(filePath)) return;
+  try {
+    if (!existsSync(BACKUP_DIR)) mkdirSync(BACKUP_DIR, { recursive: true });
+    const rel = relative(process.cwd(), filePath).replace(/[/\\]/g, '_');
+    const ts = Date.now();
+    const backupPath = join(BACKUP_DIR, `${ts}_${rel}`);
+    copyFileSync(filePath, backupPath);
+    fileBackupStack.push({ path: filePath, backupPath, timestamp: ts });
+    if (fileBackupStack.length > MAX_BACKUPS) {
+      const old = fileBackupStack.shift()!;
+      try { unlinkSync(old.backupPath); } catch {}
+    }
+  } catch {}
+}
 
 function getSkillSystemPrompt(): string {
   if (!skillEngine) return '';
@@ -50,7 +90,6 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
   const tools = await loadBuiltinTools();
   const toolDefs = toolsToDefs(tools);
 
-  // 连接 subagent 工具到真正的子代理执行引擎
   const { setSubagentRunner } = await import('../tools/builtin/index.js');
   setSubagentRunner(async (task: string, mode: 'foreground' | 'background') => {
     const isBg = mode === 'background';
@@ -68,14 +107,20 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
         let curTc: { id: string; name: string; argsStr: string } | null = null;
         let se: string | null = null;
         try {
-          const stream = await callApi(opts, msgs, tds, 0, 131072); GS.api++; ce = 0;
+          const stream = await callApi(opts, msgs, tds, 131072); GS.api++; ce = 0;
           for await (const chunk of stream) {
             if (chunk.type === 'text') { fc += chunk.content || ''; }
             if (chunk.type === 'thinking') th += chunk.content || '';
-            if (chunk.type === 'tool_call_start') { const tc = (chunk as any).tool_call; if (tc) curTc = { id: tc.id, name: tc.name, argsStr: '' }; }
-            if (chunk.type === 'tool_call_args' && curTc) curTc.argsStr += (chunk as any).content || '';
+            if (chunk.type === 'tool_call_start') {
+              const tc = (chunk as any).tool_call;
+              if (tc) curTc = { id: tc.id, name: tc.name, argsStr: '' };
+            }
             if (chunk.type === 'tool_call_end' && curTc) {
-              try { tcs.push({ id: curTc.id, name: curTc.name, args: JSON.parse(curTc.argsStr || '{}') }); } catch { tcs.push({ id: curTc.id, name: curTc.name, args: {} }); }
+              const tcData = (chunk as any).tool_call;
+              try {
+                const args = tcData?.arguments || JSON.parse(curTc.argsStr || '{}');
+                tcs.push({ id: curTc.id, name: curTc.name, args });
+              } catch { tcs.push({ id: curTc.id, name: curTc.name, args: {} }); }
               curTc = null;
             }
             if (chunk.type === 'done') break;
@@ -94,7 +139,11 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
             const s2 = TOOL_SAFETY_MAP[tc.name] || 'safe';
             if (s2 === 'dangerous') { lh.push({ role: 'tool', content: 'Skipped', tool_call_id: tc.id }); continue; }
             try {
-              const r = await tool.execute(tc.args, new AbortController().signal);
+              const ac = new AbortController();
+              const timeout = TOOL_TIMEOUT_MAP[tc.name] || DEFAULT_TOOL_TIMEOUT;
+              const timer = setTimeout(() => ac.abort(), timeout);
+              const r = await tool.execute(tc.args, ac.signal);
+              clearTimeout(timer);
               const txt = sanitize(r.output || '').slice(0, TOOL_RESULT_MAX);
               lh.push({ role: 'tool', content: r.success ? txt : `Error: ${(r as any).error}`, tool_call_id: tc.id });
               GS.tc++;
@@ -102,17 +151,16 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
           }
           trimHistory(lh, 20); continue;
         }
-        // 无工具调用但有文本 → 完成
         if (fc) { lh.push({ role: 'assistant', content: fc, reasoning_content: th || undefined }); stag = 0; }
         else { stag++; if (stag >= 3) return `停滞: 连续${stag}轮无进展`; continue; }
-        const final = lh[lh.length-1]?.content || '完成';
+        const final = lh[lh.length - 1]?.content || '完成';
         return final.slice(0, 800);
       }
     };
 
     if (isBg) {
       run().then(result => {
-        history.push({ role: 'system', content: `[子代理] ${task.slice(0,50)} → ${result.slice(0, 300)}` });
+        history.push({ role: 'system', content: `[子代理] ${task.slice(0, 50)} → ${result.slice(0, 300)}` });
       });
       return `后台子代理已启动: ${task.slice(0, 80)}`;
     } else {
@@ -134,14 +182,10 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
     history.push({ role: 'system', content: `[跨会话记忆·已加载 ${prevCount} 条]\n${prevSummary.slice(0, 800)}` });
   }
 
-  // 加载 Skills
   skillEngine = new SkillEngine();
   let skillCount = 0;
-  try {
-    skillCount = await skillEngine.loadAll();
-  } catch { /* skills optional */ }
+  try { skillCount = await skillEngine.loadAll(); } catch { /* skills optional */ }
 
-  // 连接 MCP 服务器
   let mcpCount = 0;
   let mcpToolCount = 0;
   try {
@@ -183,10 +227,11 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
   drawHeader();
 
   let resizeTimer: ReturnType<typeof setTimeout> | null = null;
-  process.stdout.on('resize', () => {
+  const onResize = () => {
     if (resizeTimer) return;
     resizeTimer = setTimeout(() => { resizeTimer = null; Oflush(); }, 200);
-  });
+  };
+  process.stdout.on('resize', onResize);
 
   let resolveLine: ((v: string) => void) | null = null;
   let running = true;
@@ -204,13 +249,25 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
     return ok;
   };
 
-  rl.on('SIGINT', () => {
+  const onSigint = () => {
+    if (currentAbortController) {
+      currentAbortController.abort();
+      currentAbortController = null;
+      O(y('\n  ⚡ 已中断当前请求\n'));
+      return;
+    }
     if (resolveLine) { const cb = resolveLine; resolveLine = null; cb('/quit'); return; }
     Oflush();
+    process.stdout.removeListener('resize', onResize);
+    process.removeListener('uncaughtException', onUCE);
+    process.removeListener('unhandledRejection', onUHR);
     xmemory.save().then(() => { O('\n' + y('再见！') + '\n'); running = false; rl.close(); process.exit(0); });
-  });
-  process.on('uncaughtException', (err) => { if (!err.message?.includes('readline')) O(r(`\n  ⚠ ${err.message}`) + '\n'); });
-  process.on('unhandledRejection', (reason: unknown) => { const m = reason instanceof Error ? reason.message : String(reason); if (!m.includes('readline') && !m.includes('Abort') && !m.includes('timeout')) O(r(`\n  ⚠ ${m}`) + '\n'); });
+  };
+  rl.on('SIGINT', onSigint);
+  const onUCE = (err: Error) => { if (!err.message?.includes('readline') && !err.message?.includes('abort')) O(r(`\n  ⚠ ${err.message}`) + '\n'); };
+  process.on('uncaughtException', onUCE);
+  const onUHR = (reason: unknown) => { const m = reason instanceof Error ? reason.message : String(reason); if (!m.includes('readline') && !m.includes('Abort') && !m.includes('timeout')) O(r(`\n  ⚠ ${m}`) + '\n'); };
+  process.on('unhandledRejection', onUHR);
 
   while (running) {
     currentPrompt = c('❯ ');
@@ -241,6 +298,12 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
         O(G('  /mcp') + G('       MCP服务器') + '\n');
         O(G('  /plan') + G(' <任务> 先出方案') + '\n');
         O(G('  /spec') + G(' <任务> 先出规格') + '\n');
+        O(G('  /review') + G(' <路径> 代码审查') + '\n');
+        O(G('  /fix') + G(' [目标] 自动修复') + '\n');
+        O(G('  /commit') + G('    智能提交') + '\n');
+        O(G('  /analyze') + G(' [路径] 项目分析') + '\n');
+        O(G('  /diff') + G(' <文件> 变更预览') + '\n');
+        O(G('  /undo') + G('      撤销操作') + '\n');
         O(G('  /status') + G('    当前状态') + '\n');
         O(G('  /model') + G('     模型设置') + '\n');
         O(G('  /config') + G('    配置管理') + '\n');
@@ -305,7 +368,8 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
       if (cmd === '/help') {
         O(c('  /help /clear /quit /save [name] /load|resume [name] /sessions\n'));
         O(c('  /tools [cat] /stats /memory /tasks /model /config /cwd /export /init /mcp /rules\n'));
-        O(c('  /plan <任务> /spec <任务> /status\n\n'));
+        O(c('  /plan <任务> /spec <任务> /review <路径> /fix [目标]\n'));
+        O(c('  /commit /analyze [路径] /diff <文件> /undo /status\n\n'));
         continue;
       }
       if (cmd === '/plan') {
@@ -343,6 +407,156 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
         await runLoop(opts, history, tools, sfdefs, confirm);
         continue;
       }
+      if (cmd === '/review') {
+        const target = arg || '.';
+        O(b(c('  Review Mode')) + G(` • ${target}`) + '\n\n');
+        history.push({ role: 'system', content: `[Review Mode]
+你是一位资深代码审查专家。请对指定代码进行全面审查：
+
+1. 先用 read_file / glob_find / grep_search 读取相关代码
+2. 从以下维度逐项审查并评分（1-10）：
+   - 代码质量：可读性、命名、结构
+   - 安全性：注入、XSS、密钥泄露、权限问题
+   - 性能：N+1查询、内存泄漏、不必要的计算
+   - 可维护性：耦合度、重复代码、测试覆盖
+   - 最佳实践：设计模式、SOLID原则、错误处理
+3. 对每个问题给出：文件路径、行号范围、问题描述、修复建议、严重程度(🔴高/🟡中/🟢低)
+4. 最后给出总体评分和改进优先级列表
+
+审查目标：${target}` });
+        history.push({ role: 'user', content: `审查 ${target} 的代码质量` });
+        const rvdefs = toolsToDefs(tools);
+        await runLoop(opts, history, tools, rvdefs, confirm);
+        continue;
+      }
+      if (cmd === '/commit') {
+        O(b(c('  Commit Mode')) + G(' • 智能提交') + '\n\n');
+        try {
+          const statusOut = execSync('git status --porcelain', { encoding: 'utf-8', timeout: 10000, cwd: process.cwd() });
+          if (!statusOut.trim()) { O(y('  没有未提交的变更\n\n')); continue; }
+          const diffOut = execSync('git diff --stat', { encoding: 'utf-8', timeout: 15000, cwd: process.cwd() });
+          const stagedOut = execSync('git diff --cached --stat', { encoding: 'utf-8', timeout: 15000, cwd: process.cwd() });
+          const files = statusOut.trim().split('\n').filter(Boolean);
+          O(G(`  ${files.length} 个文件变更:\n`));
+          for (const f of files.slice(0, 20)) {
+            const status = f.slice(0, 2).trim();
+            const path = f.slice(3);
+            const icon = status === 'M' ? y('M') : status === 'A' ? g('A') : status === 'D' ? r('D') : status === '?' ? G('?') : c(status);
+            O(G(`    ${icon} ${path.slice(0, 60)}`) + '\n');
+          }
+          if (files.length > 20) O(G(`    …还有 ${files.length - 20} 个`) + '\n');
+          O('\n');
+          history.push({ role: 'system', content: `[Commit Mode]
+分析 git 变更并生成提交信息：
+1. 先用 run_command 执行 git diff 查看具体变更内容
+2. 分析变更类型和范围，生成符合 Conventional Commits 规范的提交信息
+3. 格式: type(scope): description
+   - type: feat/fix/refactor/docs/style/test/chore/perf
+   - scope: 可选，影响的模块
+4. 用 run_command 执行 git add 和 git commit
+5. 如果变更较多，建议分多次提交
+
+当前变更统计：
+${diffOut || stagedOut || '无staged变更'}` });
+          history.push({ role: 'user', content: '分析变更并提交' });
+          const cmdefs = toolsToDefs(tools);
+          await runLoop(opts, history, tools, cmdefs, confirm);
+        } catch (e: unknown) {
+          O(r(`  Git 操作失败: ${e instanceof Error ? e.message.slice(0, 80) : String(e).slice(0, 80)}\n\n`));
+        }
+        continue;
+      }
+      if (cmd === '/analyze') {
+        const target = arg || process.cwd();
+        O(b(c('  Analyze Mode')) + G(` • ${target}`) + '\n\n');
+        history.push({ role: 'system', content: `[Analyze Mode]
+你是一位项目架构分析师。请对项目进行全面分析：
+
+1. 用 glob_find 扫描项目目录结构
+2. 用 read_file 读取 package.json / tsconfig.json / Cargo.toml 等配置
+3. 用 grep_search / codebase_search 分析代码模式
+4. 输出以下分析报告：
+   - 📁 项目结构树（关键目录和文件）
+   - 🛠 技术栈识别（语言、框架、库、工具链）
+   - 📊 代码统计（文件数、代码行数估算、各语言占比）
+   - 🏗️ 架构模式（MVC/微服务/单体/插件式等）
+   - 🔗 依赖关系（核心依赖、开发依赖、版本风险）
+   - ⚠️ 潜在问题（过时依赖、安全风险、代码异味）
+   - 💡 改进建议（优先级排序）
+
+分析目标：${target}` });
+        history.push({ role: 'user', content: `分析项目 ${target}` });
+        const andefs = toolsToDefs(tools);
+        await runLoop(opts, history, tools, andefs, confirm);
+        continue;
+      }
+      if (cmd === '/fix') {
+        const target = arg || '';
+        O(b(c('  Fix Mode')) + G(' • 自动修复') + '\n\n');
+        history.push({ role: 'system', content: `[Fix Mode]
+你是一位自动修复工程师。请执行以下流程：
+
+1. 先用 run_command 运行构建命令（如 npm run build, tsc --noEmit, cargo check 等）
+2. 如果构建成功，运行测试（npm test, cargo test 等）
+3. 如果有错误：
+   a. 仔细分析错误信息，定位到具体文件和行号
+   b. 用 read_file 读取出错文件的相关代码
+   c. 理解错误根因，制定修复方案
+   d. 用 edit_file 精确修复（优先用 edit 而非重写整个文件）
+   e. 重新运行构建验证修复
+   f. 重复直到所有错误清除
+4. 如果测试失败，同样分析并修复
+5. 最多尝试修复 5 轮，避免无限循环
+6. 每次修复后都重新验证
+
+${target ? `修复目标：${target}\n` : '自动检测并修复所有构建/测试错误'}` });
+        history.push({ role: 'user', content: target || '检测并修复项目错误' });
+        const fxdefs = toolsToDefs(tools);
+        await runLoop(opts, history, tools, fxdefs, confirm);
+        continue;
+      }
+      if (cmd === '/diff') {
+        if (!arg) { O(y('  用法: /diff <文件路径>\n  显示文件最近的变更\n\n')); continue; }
+        const filePath = arg.startsWith('/') || arg.startsWith('\\') || arg.length > 2 ? arg : join(process.cwd(), arg);
+        if (fileBackupStack.length === 0) { O(y('  没有可用的备份记录\n\n')); continue; }
+        const backups = fileBackupStack.filter(b => b.path === filePath).reverse();
+        if (backups.length === 0) {
+          const allBackups = [...fileBackupStack].reverse();
+          O(G('  最近的文件变更:\n'));
+          for (const b of allBackups.slice(0, 10)) {
+            const rel = relative(process.cwd(), b.path);
+            const time = new Date(b.timestamp).toLocaleTimeString();
+            O(G(`    ${time} ${rel.slice(0, 50)}`) + '\n');
+          }
+          O('\n'); continue;
+        }
+        const latest = backups[0];
+        try {
+          const currentContent = existsSync(filePath) ? readFileSync(filePath, 'utf-8') : '(文件已删除)';
+          const backupContent = readFileSync(latest.backupPath, 'utf-8');
+          const diffResult = computeSimpleDiff(backupContent, currentContent, filePath);
+          O(b(c('  Diff')) + G(` • ${relative(process.cwd(), filePath)}`) + '\n\n');
+          O(diffResult + '\n\n');
+        } catch {
+          O(y('  无法读取文件进行对比\n\n'));
+        }
+        continue;
+      }
+      if (cmd === '/undo') {
+        if (fileBackupStack.length === 0) { O(y('  没有可撤销的操作\n\n')); continue; }
+        const last = fileBackupStack[fileBackupStack.length - 1];
+        try {
+          const rel = relative(process.cwd(), last.path);
+          copyFileSync(last.backupPath, last.path);
+          fileBackupStack.pop();
+          try { unlinkSync(last.backupPath); } catch {}
+          O(g('  ✓ 已撤销') + G(` ${rel}`) + '\n');
+          O(G('  提示: 可继续 /undo 撤销更多操作\n\n'));
+        } catch (e: unknown) {
+          O(r(`  撤销失败: ${e instanceof Error ? e.message.slice(0, 60) : String(e).slice(0, 60)}\n\n`));
+        }
+        continue;
+      }
       O(G(`  未知命令: ${cmd} (输入 /help 查看帮助)\n\n`));
       continue;
     }
@@ -356,6 +570,9 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
 
   rl.close();
   Oflush();
+  process.stdout.removeListener('resize', onResize);
+  process.removeListener('uncaughtException', onUCE);
+  process.removeListener('unhandledRejection', onUHR);
   await xmemory.save();
   if (mcpClient) mcpClient.disconnectAll();
   Oflush();
@@ -371,20 +588,20 @@ async function runLoop(
   let ttc = 0, ce = 0, stagnation = 0;
 
   for (let iter = 0; ; iter++) {
-    // 上下文接近上限 → 降 tokens 而不是直接退出
     const ctxTokens = estimateTokens(history.map(m => m.content || '').join('\n'));
     const toolsTokenOverhead = toolDefs.length * 80;
     const totalCtx = ctxTokens + toolsTokenOverhead;
     const nearLimit = totalCtx > CONTEXT_LIMIT * 0.95;
-    // 上下文自动压缩：超过 70% 时压缩旧消息
+
     if (totalCtx > CONTEXT_LIMIT * 0.7 && history.length > 10) {
       compressHistory(history);
     }
-    // 连续空转检测
+
     if (stagnation >= 5) {
       O(y(`\n  连续${stagnation}轮无进展，任务交还\n\n`));
       return;
     }
+
     const msgs = buildMsgs(history);
     const st = Date.now();
     let fc = '', th = '';
@@ -394,27 +611,28 @@ async function runLoop(
     const amax = iter === 0 ? 131072 : nearLimit ? 32768 : 65536;
     let showingThink = false;
 
-    // 思考动画：API 等待和推理期间持续显示
     resetTimer();
     const animLabel = () => showingThink ? '思考中' : '解析中';
     const animTick = () => { O('\r' + thinkingAnim(animLabel())); };
     let thinkAnimIv: ReturnType<typeof setInterval> | null = null;
-    animTick(); // 首帧立即渲染，不等 100ms
+    animTick();
     thinkAnimIv = setInterval(animTick, 80);
     const md = new MarkdownStreamRenderer();
 
     const startStreamAnim = () => {
       if (thinkAnimIv) return;
       resetTimer();
-      animTick(); // 首帧立即渲染
+      animTick();
       thinkAnimIv = setInterval(animTick, 80);
     };
     const stopStreamAnim = () => {
       if (thinkAnimIv) { clearInterval(thinkAnimIv); thinkAnimIv = null; }
     };
 
+    currentAbortController = new AbortController();
+
     try {
-      const stream = await callApi(opts, msgs, toolDefs, 0, amax);
+      const stream = await callApi(opts, msgs, toolDefs, amax, currentAbortController.signal);
       GS.api++; ce = 0;
 
       const cols = process.stdout.columns || 80;
@@ -444,16 +662,29 @@ async function runLoop(
           const tc = (chunk as any).tool_call;
           if (tc) curTc = { id: tc.id, name: tc.name, argsStr: '' };
         }
-        if (chunk.type === 'tool_call_args' && curTc) curTc.argsStr += (chunk as any).content || '';
         if (chunk.type === 'tool_call_end' && curTc) {
-          try { tcs.push({ id: curTc.id, name: curTc.name, args: JSON.parse(curTc.argsStr || '{}') }); } catch { tcs.push({ id: curTc.id, name: curTc.name, args: {} }); }
+          const tcData = (chunk as any).tool_call;
+          try {
+            const args = tcData?.arguments || JSON.parse(curTc.argsStr || '{}');
+            tcs.push({ id: curTc.id, name: curTc.name, args });
+          } catch { tcs.push({ id: curTc.id, name: curTc.name, args: {} }); }
           curTc = null;
         }
         if (chunk.type === 'done') break;
         if (chunk.type === 'error') { se = chunk.error || '?'; break; }
       }
-    } catch (e: unknown) { stopStreamAnim(); se = e instanceof Error ? e.message : String(e); }
+    } catch (e: unknown) {
+      stopStreamAnim();
+      const errMsg = e instanceof Error ? e.message : String(e);
+      if (errMsg.includes('abort') || errMsg.includes('cancel')) {
+        se = null;
+        O(y('\n  ⚡ 请求已取消\n'));
+      } else {
+        se = errMsg;
+      }
+    }
 
+    currentAbortController = null;
     stopStreamAnim();
     Oflush();
     const remaining = md.flush();
@@ -477,7 +708,6 @@ async function runLoop(
       fc = ''; th = '';
       let doneTools = 0;
 
-      // 只在第一轮显示完整任务面板
       if (iter === 0) {
         const tdSummary = todoSummary();
         if (tdSummary) { Oflush(); O('\n' + d(tdSummary.split('\n').join('\n  ')) + '\n'); }
@@ -500,7 +730,6 @@ async function runLoop(
         history.push(r2); if (!r2.content?.startsWith('Error:') && !r2.content?.includes('skipped')) { ttc++; GS.tc++; }
         doneTools++;
       }
-      // 释放 tcs 引用帮助 GC
       tcs.length = 0; safe.length = 0; rest.length = 0;
 
       trimHistory(history, MAX_HISTORY); continue;
@@ -511,7 +740,7 @@ async function runLoop(
 
     const ctxPct = ((totalCtx / CONTEXT_LIMIT) * 100).toFixed(1);
     const ctxWarn = totalCtx > CTX_WARN ? y(` ${ctxPct}%`) : G(` ${ctxPct}%`);
-    O(G(`  ▸ ${(el/1000).toFixed(1)}s · ${ttc} 工具 · 上下文${ctxWarn}`) + '\n\n');
+    O(G(`  ▸ ${(el / 1000).toFixed(1)}s · ${ttc} 工具 · 上下文${ctxWarn}`) + '\n\n');
     trimHistory(history, MAX_HISTORY);
 
     if (fc) {
@@ -558,15 +787,27 @@ async function execTool(
     const rawWrite = (s: string) => { try { process.stdout.write(s); } catch {} };
     rawWrite('\r' + thinkingAnimAt(toolName, toolStart));
     execAnimIv = setInterval(() => { rawWrite('\r' + thinkingAnimAt(toolName, toolStart)); }, 80);
-    const execed = Promise.race([
-      tool.execute(tc.args, new AbortController().signal),
-      new Promise<{ success: false; error: string; output: string }>((_, rej) => setTimeout(() => rej(new Error('工具超时 (30s)')), 30_000)),
-    ]);
+
+    const timeout = TOOL_TIMEOUT_MAP[tc.name] || DEFAULT_TOOL_TIMEOUT;
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), timeout);
+
+    if (tc.name === 'write_file' || tc.name === 'edit_file') {
+      const fp = (tc.args.file_path || tc.args.path || tc.args.file || '') as string;
+      if (fp) backupFile(fp);
+    }
+
     let result: { success: boolean; error?: string; output?: string };
-    try { result = await execed as any; } catch (e: unknown) { result = { success: false, error: (e as Error).message, output: '' }; }
+    try {
+      result = await tool.execute(tc.args, ac.signal) as any;
+      clearTimeout(timer);
+    } catch (e: unknown) {
+      clearTimeout(timer);
+      result = { success: false, error: (e as Error).message, output: '' };
+    }
+
     stopToolAnim();
     const rawResult = result.success ? result.output || '' : `Error: ${result.error || 'failed'}`;
-    // 截断超大结果防 OOM
     const text = result.success ? sanitize(rawResult).slice(0, TOOL_RESULT_MAX) : `Error: ${result.error || 'failed'}`;
     const showPath = (p: string) => p.split(/[/\\]/).filter(Boolean).slice(-2).join('/').slice(-35);
 
@@ -584,25 +825,25 @@ async function execTool(
       O(A.y + A.b + '  ▸▸ █ 任务面板' + A.R + '\n');
       const lines = rawResult.split('\n').filter(Boolean);
       let shown = 0; const MAX_SHOW = 16;
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed) continue;
-          if (/^📋/.test(trimmed)) {
-            O(A.b + '  ' + trimmed + A.R + '\n');
-            continue;
-          }
-          shown++;
-          if (shown > MAX_SHOW) { O(G('  …\n')); break; }
-          const depth = line.match(/^(\s*)/)?.[1].length ?? 0;
-          const colored = trimmed
-            .replace(/^✓\s*/, g('✓ '))
-            .replace(/^◉\s*/, y('◉ '))
-            .replace(/^○\s*/, G('○ '))
-            .replace(/^✗\s*/, r('✗ '));
-          if (depth >= 4) O(G('    ') + colored + '\n');
-          else if (depth >= 2) O(G('  ') + colored + '\n');
-          else O('  ' + colored + '\n');
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        if (/^📋/.test(trimmed)) {
+          O(A.b + '  ' + trimmed + A.R + '\n');
+          continue;
         }
+        shown++;
+        if (shown > MAX_SHOW) { O(G('  …\n')); break; }
+        const depth = line.match(/^(\s*)/)?.[1].length ?? 0;
+        const colored = trimmed
+          .replace(/^✓\s*/, g('✓ '))
+          .replace(/^◉\s*/, y('◉ '))
+          .replace(/^○\s*/, G('○ '))
+          .replace(/^✗\s*/, r('✗ '));
+        if (depth >= 4) O(G('    ') + colored + '\n');
+        else if (depth >= 2) O(G('  ') + colored + '\n');
+        else O('  ' + colored + '\n');
+      }
       O('\n');
     } else {
       O(g(' ✓') + G(` ${c(tc.name)} ${brief}\n`));
@@ -628,18 +869,51 @@ async function execTool(
 
 function buildMsgs(history: Message[]): Array<Record<string, unknown>> {
   const r: Array<Record<string, unknown>> = [];
-  let sysContent = `You are DeeperCode V4-Pro, a full-stack coding agent.
-Rules:
-1. Read before write. Use tools to inspect project state first.
-2. Write COMPLETE files. No placeholders like "// ..." or "rest of code".
-3. One write_file = one complete file. Batch independent writes.
-4. Use todo_manager for multi-step tasks. Update status as you progress.
-5. Keep reasoning brief. Prefer action over explanation.
-6. cwd=${process.cwd()} plat=${process.platform}
-7. Respond in Chinese when user uses Chinese.`;
+  let sysContent = `You are DeeperCode V4-Pro, an elite full-stack AI coding agent with autonomous execution capability.
+
+## Core Principles
+1. READ BEFORE WRITE — Always inspect project state before making changes.
+2. COMPLETE CODE — Write full files. Never use placeholders like "// ..." or "rest of code".
+3. ONE CALL = ONE FILE — Each write_file contains exactly one complete file. Batch independent writes.
+4. PLAN WITH TODOS — Use todo_manager for multi-step tasks. Update status as you progress.
+5. ACT OVER EXPLAIN — Keep reasoning brief. Prefer tool calls over lengthy explanations.
+6. VERIFY AFTER WRITE — After writing code, run type checks, linters, or tests to confirm correctness.
+7. FIX ERRORS PROACTIVELY — If a tool returns an error, diagnose and fix it immediately.
+8. PARALLEL WHEN POSSIBLE — Execute independent tool calls simultaneously for efficiency.
+
+## Smart Editing Strategy
+- For EXISTING files, prefer edit_file over write_file to minimize diff size.
+- For NEW files, use write_file with complete content.
+- Before editing, read the file first to understand its current state.
+- Make targeted, minimal edits rather than rewriting entire files.
+
+## Auto-Verification Loop
+After writing or editing code files, ALWAYS verify the changes:
+1. Run the project's build command (npm run build, tsc --noEmit, cargo check, etc.)
+2. If build fails, read the error output, fix the issues, and re-verify
+3. If tests exist, run them to confirm nothing is broken
+4. Repeat until all checks pass — do NOT leave the user with broken code
+
+## Error Recovery
+- When a tool call fails, analyze the error message carefully before retrying
+- If the same approach fails twice, try a different strategy
+- For type errors: read the file, understand the types, fix precisely
+- For runtime errors: add proper error handling and logging
+- Never give up after one failure — adapt and overcome
+
+## Execution Strategy
+- Start by reading relevant files and understanding the codebase structure.
+- Break complex tasks into small, verifiable steps.
+- After each code change, verify it compiles/passes before moving on.
+- When stuck, try a different approach rather than repeating the same failed action.
+- Use subagent for independent subtasks that can run in parallel.
+
+## Context
+- cwd=${process.cwd()} plat=${process.platform} arch=${process.arch}
+- Respond in the same language as the user's input.`;
 
   const ts = todoSummary(4);
-  if (ts) sysContent += '\n[Remaining]\n' + ts;
+  if (ts) sysContent += '\n[Remaining Tasks]\n' + ts;
 
   const lastU = history.filter(m => m.role === 'user').pop();
   if (lastU?.content) {
@@ -647,41 +921,24 @@ Rules:
     if (hints) sysContent += '\n' + hints;
   }
   const workCtx = xmemory.getWorkingContext(400);
-  if (workCtx) sysContent += '\n[最近工作]\n' + workCtx;
+  if (workCtx) sysContent += '\n[Recent Work]\n' + workCtx;
 
   const skillPrompt = getSkillSystemPrompt();
   if (skillPrompt) sysContent += '\n' + skillPrompt;
 
   r.push({ role: 'system', content: sysContent });
 
-  // 自动注入 deeper.md 项目上下文 + rules 规则
-  try {
-    const deeperMd = join(process.cwd(), 'deeper.md');
-    if (existsSync(deeperMd)) {
-      const ctx = readFileSync(deeperMd, 'utf-8').slice(0, 4000);
-      if (ctx.trim() && !ctx.includes('<!-- 填写')) {
-        r.push({ role: 'system', content: `[项目上下文 deeper.md]\n${ctx}` });
-      }
-    }
-  } catch { /* skip */ }
-  try {
-    const rulesFile = join(process.cwd(), '.deeper', 'rules.md');
-    if (existsSync(rulesFile)) {
-      const rules = readFileSync(rulesFile, 'utf-8').slice(0, 4000);
-      if (rules.trim()) r.push({ role: 'system', content: `[项目规则 rules.md]\n${rules}` });
-    }
-  } catch { /* skip */ }
-  try {
-    const globalRules = join(DEEPER_HOME, 'rules.md');
-    if (existsSync(globalRules)) {
-      const rules = readFileSync(globalRules, 'utf-8').slice(0, 2000);
-      if (rules.trim()) r.push({ role: 'system', content: `[全局规则]\n${rules}` });
-    }
-  } catch { /* skip */ }
+  const deeperCtx = cachedRead(join(process.cwd(), 'deeper.md'));
+  if (deeperCtx && deeperCtx.trim() && !deeperCtx.includes('<!-- 填写')) {
+    r.push({ role: 'system', content: `[项目上下文 deeper.md]\n${deeperCtx}` });
+  }
+  const projRules = cachedRead(join(process.cwd(), '.deeper', 'rules.md'));
+  if (projRules && projRules.trim()) r.push({ role: 'system', content: `[项目规则 rules.md]\n${projRules}` });
+  const globalRules = cachedRead(join(DEEPER_HOME, 'rules.md'), 2000);
+  if (globalRules && globalRules.trim()) r.push({ role: 'system', content: `[全局规则]\n${globalRules}` });
 
   for (const m of history.slice(-30)) {
     const e: Record<string, unknown> = { role: m.role };
-    // 截断大型消息防止 OOM
     if (m.content != null) e.content = (m.content || '').slice(0, 8000);
     if (m.reasoning_content) e.reasoning_content = (m.reasoning_content || '').slice(0, 2000);
     if (m.tool_calls) e.tool_calls = m.tool_calls.map(t => ({
@@ -695,23 +952,63 @@ Rules:
 
 function trimHistory(h: Message[], max: number) { while (h.length > max) h.shift(); }
 
+const _fileCache = new Map<string, { mtime: number; content: string }>();
+function cachedRead(path: string, maxLen = 4000): string | null {
+  if (!existsSync(path)) return null;
+  try {
+    const st = statSync(path);
+    const cached = _fileCache.get(path);
+    if (cached && cached.mtime === st.mtimeMs) return cached.content;
+    const content = readFileSync(path, 'utf-8').slice(0, maxLen);
+    _fileCache.set(path, { mtime: st.mtimeMs, content });
+    return content;
+  } catch { return null; }
+}
+
 function compressHistory(h: Message[]): void {
   if (h.length <= 6) return;
   const keep = 6;
   const old = h.slice(0, h.length - keep);
   const recent = h.slice(h.length - keep);
-  let compressed = '';
+
+  const sections: string[] = [];
+  let userParts: string[] = [];
+  let assistantParts: string[] = [];
+  let toolParts: string[] = [];
+
+  const flushSection = () => {
+    if (userParts.length > 0) sections.push(`[用户] ${userParts.join(' → ')}`);
+    if (assistantParts.length > 0) sections.push(`[助手] ${assistantParts.join(' → ')}`);
+    if (toolParts.length > 0) sections.push(`[工具] ${toolParts.join(', ')}`);
+    userParts = []; assistantParts = []; toolParts = [];
+  };
+
   for (const m of old) {
+    if (m.role === 'system') {
+      flushSection();
+      continue;
+    }
     if (m.role === 'user' && m.content) {
-      compressed += `[用户] ${m.content.slice(0, 100)}\n`;
-    } else if (m.role === 'assistant' && m.content) {
-      compressed += `[助手] ${m.content.slice(0, 150)}\n`;
+      if (assistantParts.length > 0 || toolParts.length > 0) flushSection();
+      userParts.push(m.content.slice(0, 120));
+    } else if (m.role === 'assistant') {
+      if (m.tool_calls && m.tool_calls.length > 0) {
+        const names = m.tool_calls.map(t => t.name).join(', ');
+        toolParts.push(names);
+      }
+      if (m.content) {
+        assistantParts.push(m.content.slice(0, 150));
+      }
     } else if (m.role === 'tool' && m.content) {
-      compressed += `[工具] ${m.content.slice(0, 80)}\n`;
+      const isErr = m.content.startsWith('Error:');
+      toolParts.push(isErr ? '❌' : '✓');
     }
   }
+  flushSection();
+
+  const compressed = sections.join('\n').slice(0, 4000);
   h.length = 0;
-  h.push({ role: 'system', content: `[上下文压缩·${old.length}条摘要]\n${compressed.slice(0, 3000)}` });
+  h.push({ role: 'system', content: `[上下文压缩·${old.length}条摘要]\n${compressed}` });
   h.push(...recent);
 }
 
@@ -721,7 +1018,48 @@ function sanitize(t: string): string {
     .replace(/\n{6,}/g, '\n\n');
 }
 
-function lastUser(h: Message[]): string { for (let i = h.length-1; i>=0; i--) if (h[i].role==='user' && h[i].content) return h[i].content!; return ''; }
+function lastUser(h: Message[]): string { for (let i = h.length - 1; i >= 0; i--) if (h[i].role === 'user' && h[i].content) return h[i].content!; return ''; }
+
+function computeSimpleDiff(oldText: string, newText: string, filePath: string): string {
+  const oldLines = oldText.split('\n');
+  const newLines = newText.split('\n');
+  const maxLines = Math.max(oldLines.length, newLines.length);
+  const result: string[] = [];
+  let changeCount = 0;
+  const contextLines = 3;
+
+  for (let i = 0; i < maxLines; i++) {
+    const oldLine = oldLines[i];
+    const newLine = newLines[i];
+    if (oldLine !== newLine) {
+      changeCount++;
+      const start = Math.max(0, i - contextLines);
+      const end = Math.min(maxLines, i + contextLines + 1);
+      if (result.length === 0 || result[result.length - 1] !== '...') {
+        result.push(G(`  @@ line ${i + 1} @@`));
+      }
+      for (let j = start; j < end; j++) {
+        if (j === i) {
+          if (oldLine !== undefined && newLine !== undefined) {
+            result.push(r(`  - ${oldLines[j]}`));
+            result.push(g(`  + ${newLines[j]}`));
+          } else if (oldLine !== undefined) {
+            result.push(r(`  - ${oldLines[j]}`));
+          } else {
+            result.push(g(`  + ${newLines[j]}`));
+          }
+        } else if (j < oldLines.length && j < newLines.length) {
+          result.push(G(`    ${oldLines[j]}`));
+        }
+      }
+      result.push(G('  ...'));
+    }
+  }
+
+  if (changeCount === 0) return G('  (无变更)');
+  const rel = relative(process.cwd(), filePath);
+  return `${G(`文件: ${rel} (${changeCount} 处变更)`)}\n${result.join('\n')}`;
+}
 
 function toolsToDefs(tools: Tool[]): ToolDef[] {
   return tools.map(t => ({ type: 'function' as const, function: { name: t.name, description: t.description, parameters: t.parameters as unknown as Record<string, unknown> } }));
@@ -747,10 +1085,9 @@ async function listSessions() {
       const data = JSON.parse(readFileSync(join(SESSION_DIR, f), 'utf-8'));
       const label = f.replace(/^sess_|\.json$/g, '');
       const msgCount = data.messages?.length || 0;
-      const cwd = data.cwd || '?';
       const savedAt = data.savedAt?.slice(0, 16) || '?';
-      O(G(`  ${i+1}. `) + c(label) + G(` · ${msgCount}条 · ${savedAt}`) + '\n');
-    } catch { O(G(`  ${i+1}. ${f} (损坏)\n`)); }
+      O(G(`  ${i + 1}. `) + c(label) + G(` · ${msgCount}条 · ${savedAt}`) + '\n');
+    } catch { O(G(`  ${i + 1}. ${f} (损坏)\n`)); }
   }
   O('\n  加载: /load <name> | 恢复: /resume\n\n');
 }
@@ -759,7 +1096,7 @@ async function loadNamedSession(history: Message[], name: string) {
   const file = join(SESSION_DIR, `sess_${name}.json`);
   if (!existsSync(file)) { O(r(`会话不存在: ${name}\n\n`)); return; }
   const data = JSON.parse(readFileSync(file, 'utf-8'));
-  history.push({ role: 'system', content: `[已加载: ${name} (${data.messages?.length||0} 条)]` });
+  history.push({ role: 'system', content: `[已加载: ${name} (${data.messages?.length || 0} 条)]` });
   if (data.messages) for (const m of data.messages) history.push(m);
   trimHistory(history, MAX_HISTORY);
   O(g(`已加载: ${name}`) + '\n\n');
@@ -772,7 +1109,7 @@ async function loadLatestSession(history: Message[]) {
   const file = join(SESSION_DIR, files[0]);
   const data = JSON.parse(readFileSync(file, 'utf-8'));
   const label = files[0].replace(/^sess_|\.json$/g, '');
-  history.push({ role: 'system', content: `[已加载: ${label} (${data.messages?.length||0} 条)]` });
+  history.push({ role: 'system', content: `[已加载: ${label} (${data.messages?.length || 0} 条)]` });
   if (data.messages) for (const m of data.messages) history.push(m);
   trimHistory(history, MAX_HISTORY);
   O(g(`已加载: ${label}`) + '\n\n');
@@ -842,11 +1179,11 @@ async function showTasks(): Promise<void> {
   for (const t of items) {
     if (++shown > MAX) { O(G('  …\n')); break; }
     const s = t.status === 'done' ? g('✓') : t.status === 'in_progress' ? y('◉') : t.status === 'cancelled' ? r('✗') : G('○');
-    const plan = t.plan ? G(` → ${t.plan.slice(0,30)}`) : '';
-    O(`  ${s} ${t.title.slice(0,50)}${plan}\n`);
+    const plan = t.plan ? G(` → ${t.plan.slice(0, 30)}`) : '';
+    O(`  ${s} ${t.title.slice(0, 50)}${plan}\n`);
     if (t.subtasks) for (const st of t.subtasks) {
       const ss = st.status === 'done' ? g('  ✓') : G('  ○');
-      O(`  ${ss} ${st.title.slice(0,40)}\n`);
+      O(`  ${ss} ${st.title.slice(0, 40)}\n`);
     }
   }
   O('\n');
@@ -895,73 +1232,35 @@ async function loadBuiltinTools(): Promise<Tool[]> {
   return builtinTools as Tool[];
 }
 
-// ========== API ==========
+// ========== API (uses DeepSeekClient, no double retry) ==========
 
-interface StreamChunk {
-  type: 'text'|'thinking'|'tool_call_start'|'tool_call_args'|'tool_call_end'|'done'|'error';
-  content?: string; tool_call?: { id: string; name: string }; error?: string;
-}
-
-async function callApi(opts: ReplOptions, msgs: Array<Record<string, unknown>>, tools: ToolDef[], retry = 0, cmt = 8192): Promise<AsyncIterable<StreamChunk>> {
-  const MR = 2, TO = 90_000;
-  const ac = new AbortController(); const t = setTimeout(() => ac.abort(), TO);
-  try {
-    const resp = await fetch(`${opts.baseUrl}/v1/chat/completions`, {
-      method: 'POST', signal: ac.signal,
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${opts.apiKey}` },
-      body: JSON.stringify({
-        model: opts.model,
-        messages: msgs,
-        tools: tools.length > 0 ? tools : undefined,
-        tool_choice: tools.length > 0 ? 'auto' : undefined,
-        stream: true,
-        max_tokens: cmt,
-        temperature: opts.temperature,
-      }),
-    });
-    if (!resp.ok) {
-      const et = await resp.text().catch(() => '');
-      if (resp.status === 401) throw new Error('API Key 无效: deeper config set api_key "sk-xxx"');
-      if ((resp.status === 429 || resp.status >= 500) && retry < MR) { const d = Math.min(1000*(retry+1),5000); await new Promise(r2 => setTimeout(r2, d)); return callApi(opts, msgs, tools, retry+1, cmt); }
-      throw new Error(`HTTP ${resp.status}: ${et.slice(0,200)}`);
-    }
-    if (!resp.body) throw new Error('空响应');
-    return sseIter(resp.body);
-  } catch (e: unknown) {
-    const m = (e instanceof Error ? e.message : String(e)).toLowerCase();
-    if ((m.includes('timeout')||m.includes('abort')||m.includes('econn')) && retry < MR) { const d = Math.min(1000*(retry+1),5000); await new Promise(r2 => setTimeout(r2, d)); return callApi(opts, msgs, tools, retry+1, cmt); }
-    throw e;
-  } finally { clearTimeout(t); }
-}
-
-async function* sseIter(body: ReadableStream<Uint8Array>): AsyncIterable<StreamChunk> {
-  const reader = body.getReader(); const dec = new TextDecoder(); let buf = '';
-  try {
-    while (true) {
-      const { done, value } = await reader.read(); if (done) break;
-      buf += dec.decode(value, { stream: true });
-      if (buf.length > 65536) buf = buf.slice(-32768);
-      const lines = buf.split('\n'); buf = lines.pop() || '';
-      for (const line of lines) {
-        const tr = line.trim(); if (!tr || tr.startsWith(':')) continue; if (!tr.startsWith('data: ')) continue;
-        const d = tr.slice(6).trim(); if (d === '[DONE]') { yield { type: 'done' }; return; }
-        try {
-          const p = JSON.parse(d); const ch = p.choices?.[0]; if (!ch) continue;
-          const dl = ch.delta;
-          if (dl?.content) yield { type: 'text', content: dl.content };
-          if (dl?.reasoning_content) yield { type: 'thinking', content: dl.reasoning_content };
-          if (dl?.tool_calls) for (const tc of dl.tool_calls) {
-            if (tc.id) yield { type: 'tool_call_start', tool_call: { id: tc.id, name: tc.function?.name || '' } };
-            if (tc.function?.arguments) yield { type: 'tool_call_args', content: tc.function.arguments };
-            if (tc.id && tc.function?.arguments) yield { type: 'tool_call_end' };
-          }
-          if (ch.finish_reason === 'tool_calls') yield { type: 'tool_call_end' };
-        } catch { /* skip */ }
-      }
-    }
-  } catch (e: unknown) {
-    if (e instanceof Error && e.name === 'AbortError') { /* ok */ }
-    else yield { type: 'error', error: e instanceof Error ? e.message : String(e) };
-  } finally { try { reader.releaseLock(); } catch { /* */ } }
-  yield { type: 'done' };
+async function callApi(
+  opts: ReplOptions, msgs: Array<Record<string, unknown>>,
+  tools: ToolDef[], cmt = 8192, signal?: AbortSignal,
+): Promise<AsyncIterable<StreamChunk>> {
+  const client = new DeepSeekClient({
+    apiKey: opts.apiKey || '',
+    model: opts.model || 'deepseek-chat',
+    baseUrl: opts.baseUrl || 'https://api.deepseek.com',
+    temperature: opts.temperature ?? 0,
+    maxTokens: cmt,
+    think: { enabled: true, budgetTokens: cmt },
+    signal,
+  });
+  const chatMsgs: ChatMessage[] = msgs.map(m => ({
+    role: (m.role as ChatMessage['role']) || 'user',
+    content: m.content != null ? String(m.content) : null,
+    tool_calls: m.tool_calls as ChatMessage['tool_calls'],
+    tool_call_id: m.tool_call_id as string | undefined,
+    name: m.name as string | undefined,
+    reasoning_content: m.reasoning_content as string | undefined,
+    thinking: m.thinking as string | undefined,
+  }));
+  const stream = await client.chatStream(chatMsgs, tools.map(t => ({
+    name: t.function.name,
+    description: t.function.description,
+    category: '',
+    parameters: t.function.parameters as unknown as import('../tools/tool-types.js').JSONSchema,
+  })));
+  return stream;
 }

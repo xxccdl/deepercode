@@ -1,5 +1,5 @@
 import type { ChatMessage, DeepSeekConfig, StreamChunk } from './types.js';
-import type { ToolDefinition, ToolCall } from '../tools/tool-types.js';
+import type { ToolDefinition } from '../tools/tool-types.js';
 import { RetryManager } from './RetryManager.js';
 import { StreamHandler } from './StreamHandler.js';
 import { logger } from '../core/logger.js';
@@ -41,13 +41,22 @@ interface ChatCompletionResponse {
 const DEFAULT_TIMEOUT_MS = 120000;
 const MAX_RETRIES = 3;
 
+const isRetryable = (error: Error, _attempt: number): boolean => {
+  const msg = error.message.toLowerCase();
+  if (msg.includes('429') || msg.includes('rate limit')) return true;
+  if (msg.includes('500') || msg.includes('502') || msg.includes('503') || msg.includes('504')) return true;
+  if (msg.includes('timeout') || msg.includes('abort')) return _attempt < 2;
+  if (msg.includes('econnreset') || msg.includes('econnrefused')) return true;
+  return false;
+};
+
 export class DeepSeekClient {
   private config: DeepSeekConfig;
   private retryManager: RetryManager;
 
   constructor(config: DeepSeekConfig) {
     this.config = config;
-    this.retryManager = new RetryManager(config.maxTokens > 0 ? MAX_RETRIES : MAX_RETRIES);
+    this.retryManager = new RetryManager(MAX_RETRIES);
   }
 
   async chat(
@@ -59,12 +68,12 @@ export class DeepSeekClient {
     const body = this.buildRequestBody(messages, tools, cfg, false);
 
     const response = await this.retryManager.execute(async () => {
-      const result = await this.retryManager.withTimeout(
+      return this.retryManager.withTimeout(
         () => this.makeRequest(cfg, body),
-        cfg.maxTokens > 0 ? DEFAULT_TIMEOUT_MS : DEFAULT_TIMEOUT_MS,
+        DEFAULT_TIMEOUT_MS,
+        cfg.signal,
       );
-      return result;
-    }, this.shouldRetry);
+    }, isRetryable);
 
     const data = (await response.json()) as ChatCompletionResponse;
 
@@ -89,7 +98,7 @@ export class DeepSeekClient {
     }
 
     if (message.reasoning_content) {
-      result.thinking = message.reasoning_content;
+      result.reasoning_content = message.reasoning_content;
     }
 
     return result;
@@ -104,17 +113,12 @@ export class DeepSeekClient {
     const body = this.buildRequestBody(messages, tools, cfg, true);
 
     const response = await this.retryManager.execute(async () => {
-      const result = await this.retryManager.withTimeout(
+      return this.retryManager.withTimeout(
         () => this.makeRequest(cfg, body),
         DEFAULT_TIMEOUT_MS,
+        cfg.signal,
       );
-      return result;
-    }, this.shouldRetry);
-
-    if (!response.ok) {
-      const errorBody = await response.text().catch(() => '');
-      throw new Error(`API request failed: ${response.status} ${response.statusText} - ${errorBody}`);
-    }
+    }, isRetryable);
 
     if (!response.body) {
       throw new Error('Response body is empty');
@@ -145,7 +149,8 @@ export class DeepSeekClient {
           const data = trimmed.slice(6);
           const result = handler.handleEvent('message', data);
           if (result) {
-            yield result;
+            if (Array.isArray(result)) { for (const r of result) yield r; }
+            else yield result;
           }
         } else if (trimmed === 'data: [DONE]') {
           yield { type: 'done' };
@@ -160,7 +165,8 @@ export class DeepSeekClient {
         const data = trimmed.slice(6);
         const result = handler.handleEvent('message', data);
         if (result) {
-          yield result;
+          if (Array.isArray(result)) { for (const r of result) yield r; }
+          else yield result;
         }
       }
     }
@@ -199,12 +205,21 @@ export class DeepSeekClient {
         if (m.name) {
           msg.name = m.name;
         }
+        const rc = m.reasoning_content || m.thinking;
+        if (rc) msg.reasoning_content = rc;
         return msg;
       }),
       temperature: config.temperature,
       max_tokens: config.maxTokens,
       stream,
     };
+
+    if (config.think?.enabled) {
+      (body as Record<string, unknown>).thinking = {
+        type: 'enabled',
+        budget_tokens: config.think.budgetTokens,
+      };
+    }
 
     if (tools && tools.length > 0) {
       body.tools = tools.map((tool) => ({
@@ -226,7 +241,7 @@ export class DeepSeekClient {
 
     logger.debug('DeepSeek API request', { url, model: config.model });
 
-    const response = await fetch(url, {
+    const fetchOpts: RequestInit = {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -234,7 +249,13 @@ export class DeepSeekClient {
         'Accept': 'application/json',
       },
       body,
-    });
+    };
+
+    if (config.signal) {
+      fetchOpts.signal = config.signal;
+    }
+
+    const response = await fetch(url, fetchOpts);
 
     if (!response.ok) {
       const errorBody = await response.text().catch(() => '');
@@ -247,25 +268,6 @@ export class DeepSeekClient {
     }
 
     return response;
-  }
-
-  private shouldRetry(error: Error, attempt: number): boolean {
-    const message = error.message.toLowerCase();
-
-    if (message.includes('429') || message.includes('rate limit')) {
-      return true;
-    }
-    if (message.includes('5') && (message.includes('500') || message.includes('502') || message.includes('503') || message.includes('504'))) {
-      return true;
-    }
-    if (message.includes('timeout') || message.includes('abort')) {
-      return attempt < 2;
-    }
-    if (message.includes('econnreset') || message.includes('econnrefused')) {
-      return true;
-    }
-
-    return false;
   }
 
   private parseArguments(argsStr: string): Record<string, unknown> {

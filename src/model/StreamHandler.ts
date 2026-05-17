@@ -7,17 +7,27 @@ interface ParsedSSEEvent {
   id?: string;
 }
 
+interface PendingToolCall {
+  id: string;
+  name: string;
+  argsStr: string;
+  index: number;
+  started: boolean;
+}
+
 export class StreamHandler {
   private textBuffer: string;
   private thinkingBuffer: string;
-  private toolCallBuffer: Map<number, ToolCall>;
+  private toolCallBuffer: Map<number, PendingToolCall>;
   private finished: boolean;
+  private lastYieldedIndex: number;
 
   constructor() {
     this.textBuffer = '';
     this.thinkingBuffer = '';
     this.toolCallBuffer = new Map();
     this.finished = false;
+    this.lastYieldedIndex = -1;
   }
 
   reset(): void {
@@ -25,11 +35,20 @@ export class StreamHandler {
     this.thinkingBuffer = '';
     this.toolCallBuffer.clear();
     this.finished = false;
+    this.lastYieldedIndex = -1;
   }
 
-  handleEvent(event: string, data: string): StreamChunk | null {
+  handleEvent(event: string, data: string): StreamChunk | StreamChunk[] | null {
+    if (event === 'error') {
+      return { type: 'error', error: data || 'SSE error event' };
+    }
+
     if (event === '[DONE]' || data === '[DONE]') {
+      const results = this.finalizePendingToolCalls();
       this.finished = true;
+      if (results.length > 0) {
+        return [...results, { type: 'done' } as StreamChunk];
+      }
       return { type: 'done' };
     }
 
@@ -49,12 +68,24 @@ export class StreamHandler {
       const delta = choice.delta as Record<string, unknown> | undefined;
 
       if (!delta) {
+        const finishReason = choice.finish_reason as string | undefined;
+        if (finishReason === 'stop' || finishReason === 'length' || finishReason === 'tool_calls') {
+          const results = this.finalizePendingToolCalls();
+          this.finished = true;
+          if (results.length > 0) {
+            return [...results, { type: 'done' } as StreamChunk];
+          }
+          return { type: 'done' };
+        }
         return null;
       }
 
       if (delta.reasoning_content) {
         const thinkingChunk = delta.reasoning_content as string;
         this.thinkingBuffer += thinkingChunk;
+        if (this.thinkingBuffer.length > 100_000) {
+          this.thinkingBuffer = this.thinkingBuffer.slice(-80_000);
+        }
         return {
           type: 'thinking',
           content: thinkingChunk,
@@ -68,6 +99,9 @@ export class StreamHandler {
       if (delta.content) {
         const textChunk = delta.content as string;
         this.textBuffer += textChunk;
+        if (this.textBuffer.length > 500_000) {
+          this.textBuffer = this.textBuffer.slice(-400_000);
+        }
         return {
           type: 'text',
           content: textChunk,
@@ -76,7 +110,11 @@ export class StreamHandler {
 
       const finishReason = choice.finish_reason as string | undefined;
       if (finishReason === 'stop' || finishReason === 'length' || finishReason === 'tool_calls') {
+        const results = this.finalizePendingToolCalls();
         this.finished = true;
+        if (results.length > 0) {
+          return [...results, { type: 'done' } as StreamChunk];
+        }
         return { type: 'done' };
       }
     } catch {
@@ -99,10 +137,16 @@ export class StreamHandler {
 
   getToolCalls(): ToolCall[] {
     const result: ToolCall[] = [];
-    for (let i = 0; i < this.toolCallBuffer.size; i++) {
-      const tc = this.toolCallBuffer.get(i);
-      if (tc) {
-        result.push(tc);
+    const indices = [...this.toolCallBuffer.keys()].sort((a, b) => a - b);
+    for (const idx of indices) {
+      const pending = this.toolCallBuffer.get(idx);
+      if (pending) {
+        result.push({
+          id: pending.id,
+          name: pending.name,
+          arguments: this.parseArgsStr(pending.argsStr),
+          index: pending.index,
+        });
       }
     }
     return result;
@@ -112,7 +156,9 @@ export class StreamHandler {
     return this.finished;
   }
 
-  private handleToolCallsDelta(toolCalls: Array<Record<string, unknown>>): StreamChunk | null {
+  private handleToolCallsDelta(toolCalls: Array<Record<string, unknown>>): StreamChunk[] {
+    const results: StreamChunk[] = [];
+
     for (const tc of toolCalls) {
       const index = tc.index as number;
       const id = tc.id as string | undefined;
@@ -122,7 +168,9 @@ export class StreamHandler {
         this.toolCallBuffer.set(index, {
           id: id ?? '',
           name: fn?.name as string ?? '',
-          arguments: {},
+          argsStr: '',
+          index,
+          started: false,
         });
       }
 
@@ -135,24 +183,72 @@ export class StreamHandler {
         existing.name = fn.name as string;
       }
       if (fn?.arguments) {
-        try {
-          const argsStr = fn.arguments as string;
-          const parsed = JSON.parse(argsStr) as Record<string, unknown>;
-          existing.arguments = { ...existing.arguments, ...parsed };
-        } catch {
-          existing.arguments = existing.arguments || {};
+        existing.argsStr += fn.arguments as string;
+      }
+
+      if (!existing.started) {
+        existing.started = true;
+        if (this.lastYieldedIndex >= 0) {
+          const prev = this.toolCallBuffer.get(this.lastYieldedIndex);
+          if (prev && prev !== existing) {
+            results.push({
+              type: 'tool_call_end',
+              tool_call: {
+                id: prev.id,
+                name: prev.name,
+                arguments: this.parseArgsStr(prev.argsStr),
+                index: prev.index,
+              },
+            } as StreamChunk);
+          }
         }
+        this.lastYieldedIndex = index;
+        results.push({
+          type: 'tool_call_start',
+          tool_call: { id: existing.id, name: existing.name, index: existing.index },
+        } as StreamChunk);
       }
     }
 
-    const currentCall = this.toolCallBuffer.get(toolCalls[0].index as number);
-    if (currentCall) {
-      return {
-        type: 'tool_call',
-        tool_call: { ...currentCall, arguments: { ...currentCall.arguments } },
-      };
-    }
+    return results;
+  }
 
-    return null;
+  private finalizePendingToolCalls(): StreamChunk[] {
+    const results: StreamChunk[] = [];
+    if (this.lastYieldedIndex >= 0) {
+      const last = this.toolCallBuffer.get(this.lastYieldedIndex);
+      if (last) {
+        results.push({
+          type: 'tool_call_end',
+          tool_call: {
+            id: last.id,
+            name: last.name,
+            arguments: this.parseArgsStr(last.argsStr),
+            index: last.index,
+          },
+        } as StreamChunk);
+      }
+      this.lastYieldedIndex = -1;
+    }
+    return results;
+  }
+
+  private parseArgsStr(argsStr: string): Record<string, unknown> {
+    if (!argsStr) return {};
+    try {
+      return JSON.parse(argsStr) as Record<string, unknown>;
+    } catch {
+      const trimmed = argsStr.trim();
+      if (trimmed.startsWith('{') && !trimmed.endsWith('}')) {
+        try {
+          return JSON.parse(trimmed + '}') as Record<string, unknown>;
+        } catch {
+          try {
+            return JSON.parse(trimmed + '}}') as Record<string, unknown>;
+          } catch {}
+        }
+      }
+      return {};
+    }
   }
 }

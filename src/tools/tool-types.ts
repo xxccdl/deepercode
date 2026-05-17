@@ -43,6 +43,7 @@ export interface ToolCall {
   id: string;
   name: string;
   arguments: Record<string, unknown>;
+  index?: number;
 }
 
 export interface ToolCallResult {
