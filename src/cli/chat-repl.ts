@@ -87,7 +87,7 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
 
         if (tcs.length > 0) {
           stag = 0;
-          lh.push({ role: 'assistant', content: fc || null, reasoning_content: undefined as string | undefined, tool_calls: tcs.map(t => ({ id: t.id, name: t.name, arguments: { ...t.args } })) });
+          lh.push({ role: 'assistant', content: fc || null, reasoning_content: th || undefined, tool_calls: tcs.map(t => ({ id: t.id, name: t.name, arguments: { ...t.args } })) });
           for (const tc of tcs) {
             const tool = tools.find(t => t.name === tc.name);
             if (!tool) { lh.push({ role: 'tool', content: `Error: unknown ${tc.name}`, tool_call_id: tc.id }); continue; }
@@ -435,7 +435,7 @@ async function runLoop(
       stagnation = 0;
       Oflush();
       const compactFc = fc && fc.length > 500 ? fc.replace(/\n/g, ' ').slice(0, 300) + '…' : fc;
-      history.push({ role: 'assistant', content: compactFc || null, reasoning_content: undefined, tool_calls: tcs.map(t => ({ id: t.id, name: t.name, arguments: { ...t.args } })) });
+      history.push({ role: 'assistant', content: compactFc || null, reasoning_content: th || undefined, tool_calls: tcs.map(t => ({ id: t.id, name: t.name, arguments: { ...t.args } })) });
       fc = ''; th = '';
       let doneTools = 0;
 
