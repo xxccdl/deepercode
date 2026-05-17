@@ -719,7 +719,7 @@ async function runLoop(
         const results = await Promise.allSettled(safe.map(async tc => { const r = await execTool(tc, tools, opts); doneTools++; return r; }));
         for (const r of results) {
           if (r.status === 'fulfilled') { history.push(r.value); ttc++; GS.tc++; }
-          else { history.push({ role: 'tool', content: `Error: ${String(r.reason)}`, tool_call_id: 'parallel' }); }
+          else { history.push({ role: 'tool', content: `Error: ${String(r.reason)}`, tool_call_id: 'parallel', name: 'parallel' }); }
         }
       } else if (safe.length === 1) {
         const r = await execTool(safe[0], tools, opts);
