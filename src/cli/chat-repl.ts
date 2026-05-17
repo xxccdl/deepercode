@@ -61,8 +61,7 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
       ];
       const tds = toolsToDefs(tools);
       let ce = 0, stag = 0;
-      const MAX_ITER_SUB = 166;
-      for (let iter = 0; iter < MAX_ITER_SUB; iter++) {
+      while (true) {
         const msgs = buildMsgs(lh);
         let fc = '', th = '';
         let tcs: Array<{ id: string; name: string; args: Record<string, unknown> }> = [];
@@ -109,7 +108,6 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
         const final = lh[lh.length-1]?.content || '完成';
         return final.slice(0, 800);
       }
-      return `达到最大迭代(${MAX_ITER_SUB})`;
     };
 
     if (isBg) {
@@ -333,9 +331,8 @@ async function runLoop(
   toolDefs: ToolDef[], confirm: (msg: string) => Promise<boolean>,
 ): Promise<void> {
   let ttc = 0, ce = 0, stagnation = 0;
-  const MAX_ITER_MAIN = 50;
 
-  for (let iter = 0; iter < MAX_ITER_MAIN; iter++) {
+  for (let iter = 0; ; iter++) {
     // 上下文接近上限 → 降 tokens 而不是直接退出
     const ctxTokens = estimateTokens(history.map(m => m.content || '').join('\n'));
     const toolsTokenOverhead = toolDefs.length * 80;
