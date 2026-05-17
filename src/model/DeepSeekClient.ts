@@ -240,7 +240,13 @@ export class DeepSeekClient {
       body.tool_choice = 'auto';
     }
 
-    return JSON.stringify(body);
+    return JSON.stringify({
+      ...body,
+      messages: (body.messages as Array<Record<string, unknown>>).map(m => {
+        if (m.role === 'tool' && !m.name) m.name = 'tool';
+        return m;
+      }),
+    });
   }
 
   private async makeRequest(config: DeepSeekConfig, body: string): Promise<Response> {
