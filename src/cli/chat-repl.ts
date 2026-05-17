@@ -952,7 +952,7 @@ After writing or editing code files, ALWAYS verify the changes:
     }
     r.push(e);
   }
-  return r;
+  return r.map(m => { if (m.role === 'tool' && !m.name) m.name = 'tool'; return m; });
 }
 
 function trimHistory(h: Message[], max: number) { while (h.length > max) h.shift(); }

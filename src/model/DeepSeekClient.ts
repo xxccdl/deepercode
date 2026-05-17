@@ -210,6 +210,11 @@ export class DeepSeekClient {
         const rc = m.reasoning_content || m.thinking;
         if (rc) msg.reasoning_content = rc;
         return msg;
+      }).map((msg) => {
+        if (msg.role === 'tool' && !msg.name) {
+          (msg as Record<string, unknown>).name = 'tool';
+        }
+        return msg;
       }),
       temperature: config.temperature,
       max_tokens: config.maxTokens,
