@@ -135,9 +135,9 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
           lh.push({ role: 'assistant', content: fc || null, reasoning_content: th || undefined, tool_calls: tcs.map(t => ({ id: t.id, name: t.name, arguments: { ...t.args } })) });
           for (const tc of tcs) {
             const tool = tools.find(t => t.name === tc.name);
-            if (!tool) { lh.push({ role: 'tool', content: `Error: unknown ${tc.name}`, tool_call_id: tc.id }); continue; }
+            if (!tool) { lh.push({ role: 'tool', content: `Error: unknown ${tc.name}`, tool_call_id: tc.id, name: tc.name }); continue; }
             const s2 = TOOL_SAFETY_MAP[tc.name] || 'safe';
-            if (s2 === 'dangerous') { lh.push({ role: 'tool', content: 'Skipped', tool_call_id: tc.id }); continue; }
+            if (s2 === 'dangerous') { lh.push({ role: 'tool', content: 'Skipped', tool_call_id: tc.id, name: tc.name }); continue; }
             try {
               const ac = new AbortController();
               const timeout = TOOL_TIMEOUT_MAP[tc.name] || DEFAULT_TOOL_TIMEOUT;
@@ -145,9 +145,9 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
               const r = await tool.execute(tc.args, ac.signal);
               clearTimeout(timer);
               const txt = sanitize(r.output || '').slice(0, TOOL_RESULT_MAX);
-              lh.push({ role: 'tool', content: r.success ? txt : `Error: ${(r as any).error}`, tool_call_id: tc.id });
+              lh.push({ role: 'tool', content: r.success ? txt : `Error: ${(r as any).error}`, tool_call_id: tc.id, name: tc.name });
               GS.tc++;
-            } catch (e: unknown) { lh.push({ role: 'tool', content: `Error: ${e instanceof Error ? e.message : String(e)}`, tool_call_id: tc.id }); }
+            } catch (e: unknown) { lh.push({ role: 'tool', content: `Error: ${e instanceof Error ? e.message : String(e)}`, tool_call_id: tc.id, name: tc.name }); }
           }
           trimHistory(lh, 20); continue;
         }
@@ -759,11 +759,11 @@ async function execTool(
   confirm?: (msg: string) => Promise<boolean>,
 ): Promise<Message> {
   const tool = tools.find(t => t.name === tc.name);
-  if (!tool) return { role: 'tool', content: `Error: unknown tool ${tc.name}`, tool_call_id: tc.id };
+  if (!tool) return { role: 'tool', content: `Error: unknown tool ${tc.name}`, tool_call_id: tc.id, name: tc.name };
 
   const vResult = validator.validate(tool, tc.args);
   if (!vResult.success) {
-    return { role: 'tool', content: `Error: ${vResult.error}`, tool_call_id: tc.id };
+    return { role: 'tool', content: `Error: ${vResult.error}`, tool_call_id: tc.id, name: tc.name };
   }
 
   const s = TOOL_SAFETY_MAP[tc.name] || 'safe';
@@ -776,7 +776,7 @@ async function execTool(
     const prefix = s === 'dangerous' ? '⛔' : '⚠';
     O(y(` ${prefix}确认? `));
     const ok = await confirm(`执行 ${toolName}?`);
-    if (!ok) { O(G(' 跳过\n')); return { role: 'tool', content: 'User skipped', tool_call_id: tc.id }; }
+    if (!ok) { O(G(' 跳过\n')); return { role: 'tool', content: 'User skipped', tool_call_id: tc.id, name: tc.name }; }
     O('\r' + A.d + '  ' + A.R + A.c + tSyms[0] + A.R + A.G + ' ' + toolName + A.R + '     ');
   }
 
@@ -855,13 +855,13 @@ async function execTool(
       }
     }
 
-    return { role: 'tool', content: text, tool_call_id: tc.id };
+    return { role: 'tool', content: text, tool_call_id: tc.id, name: tc.name };
   } catch (e: unknown) {
     stopToolAnim();
     const em = e instanceof Error ? e.message : String(e);
     Oflush(); O('\r' + ' '.repeat(process.stdout.columns || 80) + '\r');
     O(r(' ✗') + G(` ${tc.name} ${em.slice(0, 60)}\n`));
-    return { role: 'tool', content: `Error: ${em}`, tool_call_id: tc.id };
+    return { role: 'tool', content: `Error: ${em}`, tool_call_id: tc.id, name: tc.name };
   }
 }
 
@@ -945,6 +945,7 @@ After writing or editing code files, ALWAYS verify the changes:
       id: t.id, type: 'function', function: { name: t.name, arguments: JSON.stringify(t.arguments) },
     }));
     if (m.tool_call_id) e.tool_call_id = m.tool_call_id;
+    if (m.name) e.name = m.name;
     r.push(e);
   }
   return r;
