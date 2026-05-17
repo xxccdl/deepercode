@@ -1,0 +1,60 @@
+{
+  "name": "deeper",
+  "version": "1.0.0",
+  "description": "DeeperCode - 一句话生成完整项目的 AI Agentic CLI 工具",
+  "type": "module",
+  "bin": {
+    "deeper": "dist/cli/index.js"
+  },
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsup --watch",
+    "build": "tsup",
+    "start": "node dist/cli/index.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint src/",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "ai",
+    "agent",
+    "cli",
+    "deepseek",
+    "coding-assistant"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "cheerio": "^1.2.0",
+    "csv-parse": "^6.2.1",
+    "diff": "^9.0.0",
+    "fast-glob": "^3.3.3",
+    "glob": "^13.0.6",
+    "ink": "^5.2.1",
+    "mkdirp": "^3.0.1",
+    "open": "^11.0.0",
+    "react": "^18.3.1",
+    "toml": "^4.1.1",
+    "ws": "^8.20.1",
+    "yaml": "^2.9.0"
+  },
+  "devDependencies": {
+    "@types/diff": "^7.0.2",
+    "@types/node": "^25.7.0",
+    "@types/react": "^19.2.14",
+    "@types/ws": "^8.18.1",
+    "tsup": "^8.5.1",
+    "tsx": "^4.22.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.6"
+  },
+  "directories": {
+    "doc": "docs",
+    "test": "tests"
+  },
+  "author": "",
+  "types": "./dist/index.d.ts"
+}
