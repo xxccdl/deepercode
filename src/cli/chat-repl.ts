@@ -1130,7 +1130,10 @@ async function loadNamedSession(history: Message[], name: string) {
   if (!existsSync(file)) { O(r(`会话不存在: ${name}\n\n`)); return; }
   const data = JSON.parse(readFileSync(file, 'utf-8'));
   history.push({ role: 'system', content: `[已加载: ${name} (${data.messages?.length || 0} 条)]` });
-  if (data.messages) for (const m of data.messages) history.push(m);
+  if (data.messages) for (const m of data.messages) {
+    if (m.role === 'tool' && !m.name) m.name = 'tool';
+    history.push(m);
+  }
   trimHistory(history, MAX_HISTORY);
   O(g(`已加载: ${name}`) + '\n\n');
 }
@@ -1143,7 +1146,10 @@ async function loadLatestSession(history: Message[]) {
   const data = JSON.parse(readFileSync(file, 'utf-8'));
   const label = files[0].replace(/^sess_|\.json$/g, '');
   history.push({ role: 'system', content: `[已加载: ${label} (${data.messages?.length || 0} 条)]` });
-  if (data.messages) for (const m of data.messages) history.push(m);
+  if (data.messages) for (const m of data.messages) {
+    if (m.role === 'tool' && !m.name) m.name = 'tool';
+    history.push(m);
+  }
   trimHistory(history, MAX_HISTORY);
   O(g(`已加载: ${label}`) + '\n\n');
 }
