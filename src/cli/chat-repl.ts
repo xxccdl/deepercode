@@ -945,7 +945,11 @@ After writing or editing code files, ALWAYS verify the changes:
       id: t.id, type: 'function', function: { name: t.name, arguments: JSON.stringify(t.arguments) },
     }));
     if (m.tool_call_id) e.tool_call_id = m.tool_call_id;
-    if (m.name) e.name = m.name;
+    if (m.role === 'tool') {
+      e.name = m.name || 'tool';
+    } else if (m.name) {
+      e.name = m.name;
+    }
     r.push(e);
   }
   return r;

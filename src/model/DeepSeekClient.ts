@@ -202,7 +202,9 @@ export class DeepSeekClient {
         if (m.tool_call_id) {
           msg.tool_call_id = m.tool_call_id;
         }
-        if (m.name) {
+        if (m.role === 'tool') {
+          msg.name = m.name || 'tool';
+        } else if (m.name) {
           msg.name = m.name;
         }
         const rc = m.reasoning_content || m.thinking;
