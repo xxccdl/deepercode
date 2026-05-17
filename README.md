@@ -59,7 +59,7 @@ DeeperCode 是一款运行在**终端**中的全栈 AI 编程代理，基于 Dee
 ### 安装
 
 ```bash
-npm install -g deeper
+npm install -g deeper-cli
 ```
 
 ### 配置
