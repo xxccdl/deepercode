@@ -103,7 +103,7 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
           trimHistory(lh, 20); continue;
         }
         // 无工具调用但有文本 → 完成
-        if (fc) { lh.push({ role: 'assistant', content: fc }); stag = 0; }
+        if (fc) { lh.push({ role: 'assistant', content: fc, reasoning_content: th || undefined }); stag = 0; }
         else { stag++; if (stag >= 3) return `停滞: 连续${stag}轮无进展`; continue; }
         const final = lh[lh.length-1]?.content || '完成';
         return final.slice(0, 800);
@@ -239,6 +239,8 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
         O(G('  /tasks') + G('     任务列表') + '\n');
         O(G('  /rules') + G('     规则管理') + '\n');
         O(G('  /mcp') + G('       MCP服务器') + '\n');
+        O(G('  /plan') + G(' <任务> 先出方案') + '\n');
+        O(G('  /spec') + G(' <任务> 先出规格') + '\n');
         O(G('  /status') + G('    当前状态') + '\n');
         O(G('  /model') + G('     模型设置') + '\n');
         O(G('  /config') + G('    配置管理') + '\n');
@@ -302,7 +304,43 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
       }
       if (cmd === '/help') {
         O(c('  /help /clear /quit /save [name] /load|resume [name] /sessions\n'));
-        O(c('  /tools [cat] /stats /memory /tasks /model /config /cwd /export /init /mcp /rules\n\n'));
+        O(c('  /tools [cat] /stats /memory /tasks /model /config /cwd /export /init /mcp /rules\n'));
+        O(c('  /plan <任务> /spec <任务> /status\n\n'));
+        continue;
+      }
+      if (cmd === '/plan') {
+        if (!arg) { O(y('  用法: /plan <任务描述>\n\n')); continue; }
+        O(b(c('  Plan Mode')) + G(` • ${arg.slice(0, 50)}`) + '\n\n');
+        history.push({ role: 'system', content: `[Plan Mode]
+你必须遵循以下流程，严格按步骤执行：
+1. 先输出一份详尽的实施方案（不要写代码）
+2. 方案必须包含：需求分析、技术选型、架构设计、数据流、模块划分、实施步骤
+3. 等待用户确认方案（输入 ok/继续/可以 等确认词）
+4. 用户确认后，按方案逐步实施，每完成一步更新 todo
+5. 完成后总结交付内容
+
+当前任务：${arg}` });
+        history.push({ role: 'user', content: arg });
+        const pfdefs = toolsToDefs(tools);
+        await runLoop(opts, history, tools, pfdefs, confirm);
+        continue;
+      }
+      if (cmd === '/spec') {
+        if (!arg) { O(y('  用法: /spec <任务描述>\n\n')); continue; }
+        O(b(c('  Spec Mode')) + G(` • ${arg.slice(0, 50)}`) + '\n\n');
+        history.push({ role: 'system', content: `[Spec Mode]
+你必须遵循以下流程，严格按步骤执行：
+1. 先输出一份完整的产品规格文档（不要写代码）
+2. 规格文档必须包含：需求概述、功能清单、交互设计、数据结构、API设计、组件树、非功能性需求、测试策略、里程碑
+3. 文档使用 Markdown 格式，标题用 # 层次清晰
+4. 等待用户确认规格（输入 ok/继续/可以 等确认词）
+5. 用户确认后，按规格逐步实施，每完成一步更新 todo
+6. 完成后总结交付内容
+
+当前任务：${arg}` });
+        history.push({ role: 'user', content: arg });
+        const sfdefs = toolsToDefs(tools);
+        await runLoop(opts, history, tools, sfdefs, confirm);
         continue;
       }
       O(G(`  未知命令: ${cmd} (输入 /help 查看帮助)\n\n`));
@@ -468,7 +506,7 @@ async function runLoop(
       trimHistory(history, MAX_HISTORY); continue;
     }
 
-    if (fc) { history.push({ role: 'assistant', content: fc }); stagnation = 0; }
+    if (fc) { history.push({ role: 'assistant', content: fc, reasoning_content: th || undefined }); stagnation = 0; }
     else { stagnation++; }
 
     const ctxPct = ((totalCtx / CONTEXT_LIMIT) * 100).toFixed(1);
