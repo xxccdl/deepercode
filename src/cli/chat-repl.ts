@@ -984,6 +984,15 @@ After writing or editing code files, ALWAYS verify the changes:
     if (m.role === 'tool' && !m.name) m.name = 'tool';
     if (m.role === 'assistant' && m.tool_calls && !m.name) m.name = 'assistant';
   }
+  let i = 0;
+  while (i < r.length) {
+    const m = r[i];
+    if (m.role === 'tool' && (i === 0 || (r[i - 1].role !== 'assistant' || !r[i - 1].tool_calls))) {
+      r.splice(i, 1);
+      continue;
+    }
+    i++;
+  }
   return r;
 }
 
