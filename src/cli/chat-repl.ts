@@ -984,14 +984,37 @@ After writing or editing code files, ALWAYS verify the changes:
     if (m.role === 'tool' && !m.name) m.name = 'tool';
     if (m.role === 'assistant' && m.tool_calls && !m.name) m.name = 'assistant';
   }
+  // Phase 1: Remove orphan tool messages (no assistant+tool_calls in same turn)
   let i = 0;
   while (i < r.length) {
-    const m = r[i];
-    if (m.role === 'tool' && (i === 0 || (r[i - 1].role !== 'assistant' || !r[i - 1].tool_calls))) {
-      r.splice(i, 1);
-      continue;
+    if (r[i].role === 'tool') {
+      let ok = false;
+      for (let j = i - 1; j >= 0; j--) {
+        if (r[j].role === 'user') break;
+        if (r[j].role === 'assistant' && r[j].tool_calls) { ok = true; break; }
+      }
+      if (!ok) { r.splice(i, 1); continue; }
     }
     i++;
+  }
+  // Phase 2: Trim unmatched tool_call_ids from assistant messages
+  for (i = 0; i < r.length; i++) {
+    const m = r[i];
+    if (m.role === 'assistant' && m.tool_calls) {
+      const tcs = m.tool_calls as Array<{ id: string }>;
+      const ids = new Set<string>();
+      for (let j = i + 1; j < r.length && r[j].role === 'tool'; j++) {
+        ids.add(r[j].tool_call_id as string);
+      }
+      const matched = tcs.filter(tc => ids.has(tc.id));
+      if (matched.length === 0) {
+        r.splice(i, 1);
+        while (i < r.length && r[i].role === 'tool') { r.splice(i, 1); }
+        i--;
+      } else if (matched.length < tcs.length) {
+        (m.tool_calls as unknown) = matched;
+      }
+    }
   }
   return r;
 }
