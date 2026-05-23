@@ -172,16 +172,23 @@ export class MarkdownStreamRenderer {
   }
 
   private visualLen(s: string): number {
-    return s.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/[^\x00-\xff]/g, '  ').length;
+    const plain = s.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
+    let len = 0;
+    for (const ch of plain) {
+      const cp = ch.codePointAt(0) || 0;
+      if (cp >= 0x1F300 && cp <= 0x1F9FF) len += 2;
+      else if (cp > 0xFF) len += 2;
+      else len += 1;
+    }
+    return len;
   }
 
   private padCell(text: string, width: number, align: string, bold: boolean): string {
-    const raw = text.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
-    const visual = this.visualLen(raw);
+    const visual = this.visualLen(text);
     const pad = Math.max(0, width - visual);
     const left = align === 'R' ? pad : align === 'C' ? Math.floor(pad / 2) : 0;
     const right = Math.max(0, pad - left);
-    const content = bold ? ansi(A.b, raw) : raw;
+    const content = bold ? ansi(A.b, text) : text;
     return ' '.repeat(left) + content + ' '.repeat(right);
   }
 
