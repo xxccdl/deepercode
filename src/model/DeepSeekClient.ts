@@ -144,14 +144,25 @@ export class DeepSeekClient {
           msg.name = m.name;
         }
         if (m.tool_calls) {
-          msg.tool_calls = m.tool_calls.map((tc) => ({
-            id: tc.id,
-            type: 'function',
-            function: {
-              name: tc.name,
-              arguments: typeof tc.arguments === 'string' ? tc.arguments : JSON.stringify(tc.arguments),
-            },
-          }));
+          msg.tool_calls = m.tool_calls.map((tc: any) => {
+            const fn = tc.function || tc;
+            let args: string;
+            if (typeof fn.arguments === 'string') {
+              args = fn.arguments;
+            } else if (fn.arguments && typeof fn.arguments === 'object') {
+              args = JSON.stringify(fn.arguments);
+            } else {
+              args = '{}';
+            }
+            return {
+              id: tc.id,
+              type: tc.type || 'function',
+              function: {
+                name: fn.name || 'unknown',
+                arguments: args,
+              },
+            };
+          });
         }
         if (m.tool_call_id) {
           msg.tool_call_id = m.tool_call_id;
