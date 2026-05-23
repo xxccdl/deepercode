@@ -22,3 +22,35 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Non-project folders
+.trae/
+chinese_chess_ai/
+skills/
+src/agent/
+src/context/
+src/game/
+src/pages/
+src/components/
+src/hooks/
+src/store/
+src/lib/
+src/assets/
+src/App.tsx
+src/main.tsx
+src/index.css
+src/vite-env.d.ts
+tests/e2e/
+tests/integration/
+public/
+index.html
+
+# Frontend tooling (non-CLI)
+vite.config.ts
+tailwind.config.js
+postcss.config.js
+eslint.config.js
+
+# Python cache
+__pycache__/
+*.pyc
