@@ -1291,6 +1291,13 @@ async function callApi(
     name: m.name as string | undefined,
     reasoning_content: m.reasoning_content as string | undefined,
   }));
+
+  for (let i = 0; i < chatMsgs.length; i++) {
+    const m = chatMsgs[i];
+    if (m.role === 'tool' && !m.name) {
+      m.name = m.tool_call_id || 'tool';
+    }
+  }
   const stream = await client.chatStream(chatMsgs, tools.map(t => ({
     name: t.function.name,
     description: t.function.description,

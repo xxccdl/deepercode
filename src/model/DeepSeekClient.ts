@@ -1,7 +1,10 @@
+import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { ChatMessage, DeepSeekConfig, StreamChunk } from './types.js';
 import type { ToolDefinition } from '../tools/tool-types.js';
 import { RetryManager } from './RetryManager.js';
 import { StreamHandler } from './StreamHandler.js';
+import { DEEPER_HOME } from '../core/constants.js';
 import { logger } from '../core/logger.js';
 
 interface ChatCompletionRequest {
@@ -167,13 +170,30 @@ export class DeepSeekClient {
       body.tool_choice = 'auto';
     }
 
-    return JSON.stringify({
-      ...body,
-      messages: (body.messages as Array<Record<string, unknown>>).map(m => {
-        if (m.role === 'tool' && !m.name) m.name = 'tool';
-        return m;
-      }),
-    });
+    for (const m of body.messages as Array<Record<string, unknown>>) {
+      if (m.role === 'tool' && !m.name) {
+        const id = m.tool_call_id ? String(m.tool_call_id).slice(0, 20) : '?';
+        logger.warn(`[SAFETY] tool message missing name (tool_call_id=${id}), injecting 'tool'`);
+        m.name = 'tool';
+      }
+    }
+
+    const raw = JSON.stringify(body);
+
+    const bodyStr = raw.replace(
+      /\{"role":"tool","content":(?:"[^"]*"|null),"tool_call_id":"[^"]*"(?!,"name":)/g,
+      (match) => {
+        const toolCallIdMatch = match.match(/"tool_call_id":"([^"]*)"/);
+        const name = toolCallIdMatch ? toolCallIdMatch[1] : 'tool';
+        logger.warn(`[SAFETY] JSON-level fix: injecting name="${name}" for tool message`);
+        return match + `,"name":"${name}"`;
+      }
+    );
+
+    const lastReqFile = join(DEEPER_HOME!, 'last_request.json');
+    try { writeFileSync(lastReqFile, bodyStr, 'utf-8'); } catch {}
+
+    return bodyStr;
   }
 
   private async makeRequest(config: DeepSeekConfig, body: string, signal?: AbortSignal): Promise<Response> {
