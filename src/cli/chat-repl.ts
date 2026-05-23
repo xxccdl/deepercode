@@ -968,16 +968,23 @@ After writing or editing code files, ALWAYS verify the changes:
     const e: Record<string, unknown> = { role: m.role };
     if (m.content != null) e.content = (m.content || '').slice(0, 8000);
     if (m.reasoning_content) e.reasoning_content = (String(m.reasoning_content)).slice(0, 2000);
+    if (m.role === 'tool') {
+      e.name = m.name || 'tool';
+    }
+    if (m.role === 'assistant' && m.tool_calls?.length) {
+      e.name = 'assistant';
+    }
     if (m.tool_calls) e.tool_calls = m.tool_calls.map(t => ({
       id: t.id, type: 'function', function: { name: t.name, arguments: JSON.stringify(t.arguments) },
     }));
     if (m.tool_call_id) e.tool_call_id = m.tool_call_id;
-    if (m.role === 'tool') {
-      e.name = m.name || 'tool';
-    }
     r.push(e);
   }
-  return r.map(m => { if (m.role === 'tool' && !m.name) m.name = 'tool'; return m; });
+  for (const m of r) {
+    if (m.role === 'tool' && !m.name) m.name = 'tool';
+    if (m.role === 'assistant' && m.tool_calls && !m.name) m.name = 'assistant';
+  }
+  return r;
 }
 
 function trimHistory(h: Message[], max: number) { while (h.length > max) h.shift(); }

@@ -20,6 +20,16 @@ interface ChatCompletionRequest {
 const DEFAULT_TIMEOUT_MS = 120000;
 const MAX_RETRIES = 3;
 
+function reorderMsgFields(msg: Record<string, unknown>, name: string): Record<string, unknown> {
+  const ordered: Record<string, unknown> = { role: msg.role };
+  if (msg.content !== undefined) ordered.content = msg.content;
+  ordered.name = name;
+  if (msg.reasoning_content !== undefined) ordered.reasoning_content = msg.reasoning_content;
+  if (msg.tool_calls !== undefined) ordered.tool_calls = msg.tool_calls;
+  if (msg.tool_call_id !== undefined) ordered.tool_call_id = msg.tool_call_id;
+  return ordered;
+}
+
 const isRetryable = (error: Error): boolean => {
   const msg = error.message.toLowerCase();
   if (msg.includes('429') || msg.includes('rate limit')) return true;
@@ -126,6 +136,13 @@ export class DeepSeekClient {
         if (m.reasoning_content || m.thinking) {
           msg.reasoning_content = m.reasoning_content || m.thinking;
         }
+        if (m.role === 'tool') {
+          msg.name = m.name || 'tool';
+        } else if (m.role === 'assistant' && m.tool_calls?.length) {
+          msg.name = m.name || 'assistant';
+        } else if (m.name) {
+          msg.name = m.name;
+        }
         if (m.tool_calls) {
           msg.tool_calls = m.tool_calls.map((tc) => ({
             id: tc.id,
@@ -138,11 +155,6 @@ export class DeepSeekClient {
         }
         if (m.tool_call_id) {
           msg.tool_call_id = m.tool_call_id;
-        }
-        if (m.role === 'tool') {
-          msg.name = m.name || 'tool';
-        } else if (m.name) {
-          msg.name = m.name;
         }
         return msg;
       }),
@@ -184,12 +196,12 @@ export class DeepSeekClient {
       for (let i = 0; i < msgs.length; i++) {
         const m = msgs[i];
         if (m.role === 'tool' && !m.name) {
-          m.name = m.tool_call_id || 'tool';
-          logger.warn(`[SAFETY] parse-fix messages[${i}] tool missing name → "${m.name}"`);
+          msgs[i] = reorderMsgFields(m, m.tool_call_id as string || 'tool');
+          logger.warn(`[SAFETY] parse-fix messages[${i}] tool missing name → "${msgs[i].name}"`);
           fixedCount++;
         }
         if (m.role === 'assistant' && m.tool_calls && !m.name) {
-          m.name = 'assistant';
+          msgs[i] = reorderMsgFields(m, 'assistant');
           logger.warn(`[SAFETY] parse-fix messages[${i}] assistant+tool_calls missing name → "assistant"`);
           fixedCount++;
         }
