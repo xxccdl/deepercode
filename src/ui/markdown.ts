@@ -171,8 +171,18 @@ export class MarkdownStreamRenderer {
     return s.split('|').map(c => c.trim());
   }
 
+  private stripMarkdown(s: string): string {
+    return s
+      .replace(/\*\*\*(.+?)\*\*\*/g, '$1')
+      .replace(/\*\*(.+?)\*\*/g, '$1')
+      .replace(/\*(.+?)\*/g, '$1')
+      .replace(/`([^`]+)`/g, '$1')
+      .replace(/~~(.+?)~~/g, '$1')
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
+  }
+
   private visualLen(s: string): number {
-    const plain = s.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
+    const plain = this.stripMarkdown(s).replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
     let len = 0;
     for (const ch of plain) {
       const cp = ch.codePointAt(0) || 0;
@@ -184,12 +194,12 @@ export class MarkdownStreamRenderer {
   }
 
   private padCell(text: string, width: number, align: string, bold: boolean): string {
-    const visual = this.visualLen(text);
+    const rendered = this.inline(text);
+    const visual = this.visualLen(rendered);
     const pad = Math.max(0, width - visual);
     const left = align === 'R' ? pad : align === 'C' ? Math.floor(pad / 2) : 0;
     const right = Math.max(0, pad - left);
-    const content = bold ? ansi(A.b, text) : text;
-    return ' '.repeat(left) + content + ' '.repeat(right);
+    return ' '.repeat(left) + rendered + ' '.repeat(right);
   }
 
   // ── Flush code ──
