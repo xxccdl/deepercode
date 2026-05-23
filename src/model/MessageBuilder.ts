@@ -132,11 +132,8 @@ export class MessageBuilder {
     if (msg.tool_call_id) {
       normalized.tool_call_id = msg.tool_call_id;
     }
-    if (msg.name) {
+    if (msg.role === 'tool' && msg.name) {
       normalized.name = msg.name;
-    }
-    if (msg.thinking) {
-      normalized.thinking = msg.thinking;
     }
 
     return normalized;

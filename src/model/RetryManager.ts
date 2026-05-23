@@ -26,17 +26,11 @@ export class RetryManager {
       } catch (error) {
         lastError = error instanceof Error ? error : new Error(String(error));
 
-        if (attempt === this.maxRetries) {
-          break;
-        }
+        if (attempt === this.maxRetries) break;
 
-        if (shouldRetry && !shouldRetry(lastError, attempt)) {
-          break;
-        }
+        if (shouldRetry && !shouldRetry(lastError, attempt)) break;
 
-        if (!shouldRetry && this.isDefaultNonRetryable(lastError)) {
-          break;
-        }
+        if (!shouldRetry && this.isDefaultNonRetryable(lastError)) break;
 
         const delay = this.calculateDelay(attempt);
 
@@ -51,7 +45,11 @@ export class RetryManager {
     throw lastError ?? new Error('Max retries exceeded');
   }
 
-  withTimeout<T>(fn: () => Promise<T>, timeoutMs: number, signal?: AbortSignal): Promise<T> {
+  withTimeout<T>(
+    fn: (signal: AbortSignal) => Promise<T>,
+    timeoutMs: number,
+    parentSignal?: AbortSignal,
+  ): Promise<T> {
     const controller = new AbortController();
 
     return new Promise<T>((resolve, reject) => {
@@ -60,34 +58,33 @@ export class RetryManager {
         reject(new Error(`Request timed out after ${timeoutMs}ms`));
       }, timeoutMs);
 
-      const onAbort = (): void => {
+      const onParentAbort = (): void => {
         clearTimeout(timer);
         controller.abort();
         reject(new Error('Request was aborted'));
       };
 
-      if (signal) {
-        if (signal.aborted) {
+      if (parentSignal) {
+        if (parentSignal.aborted) {
           clearTimeout(timer);
-          controller.abort();
           reject(new Error('Request was aborted'));
           return;
         }
-        signal.addEventListener('abort', onAbort, { once: true });
+        parentSignal.addEventListener('abort', onParentAbort, { once: true });
       }
 
-      fn()
+      fn(controller.signal)
         .then((result) => {
           clearTimeout(timer);
-          if (signal) {
-            signal.removeEventListener('abort', onAbort);
+          if (parentSignal) {
+            parentSignal.removeEventListener('abort', onParentAbort);
           }
           resolve(result);
         })
         .catch((error) => {
           clearTimeout(timer);
-          if (signal) {
-            signal.removeEventListener('abort', onAbort);
+          if (parentSignal) {
+            parentSignal.removeEventListener('abort', onParentAbort);
           }
           reject(error);
         });
@@ -109,21 +106,7 @@ export class RetryManager {
     return false;
   }
 
-  private sleep(ms: number, signal?: AbortSignal): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(resolve, ms);
-      if (signal) {
-        const onAbort = () => {
-          clearTimeout(timer);
-          reject(new Error('Retry sleep was aborted'));
-        };
-        if (signal.aborted) {
-          clearTimeout(timer);
-          reject(new Error('Retry sleep was aborted'));
-          return;
-        }
-        signal.addEventListener('abort', onAbort, { once: true });
-      }
-    });
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 }

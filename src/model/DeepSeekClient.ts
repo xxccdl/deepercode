@@ -14,38 +14,14 @@ interface ChatCompletionRequest {
   tool_choice?: string;
 }
 
-interface ChatCompletionResponse {
-  id: string;
-  object: string;
-  created: number;
-  model: string;
-  choices: Array<{
-    index: number;
-    message: {
-      role: string;
-      content: string | null;
-      tool_calls?: Array<{
-        id: string;
-        type: string;
-        function: {
-          name: string;
-          arguments: string;
-        };
-      }>;
-      reasoning_content?: string;
-    };
-    finish_reason: string;
-  }>;
-}
-
 const DEFAULT_TIMEOUT_MS = 120000;
 const MAX_RETRIES = 3;
 
-const isRetryable = (error: Error, _attempt: number): boolean => {
+const isRetryable = (error: Error): boolean => {
   const msg = error.message.toLowerCase();
   if (msg.includes('429') || msg.includes('rate limit')) return true;
   if (msg.includes('500') || msg.includes('502') || msg.includes('503') || msg.includes('504')) return true;
-  if (msg.includes('timeout') || msg.includes('abort')) return _attempt < 2;
+  if (msg.includes('timeout') || msg.includes('abort')) return true;
   if (msg.includes('econnreset') || msg.includes('econnrefused')) return true;
   return false;
 };
@@ -59,51 +35,6 @@ export class DeepSeekClient {
     this.retryManager = new RetryManager(MAX_RETRIES);
   }
 
-  async chat(
-    messages: ChatMessage[],
-    tools?: ToolDefinition[],
-    overrides?: Partial<DeepSeekConfig>,
-  ): Promise<ChatMessage> {
-    const cfg = this.mergeConfig(overrides);
-    const body = this.buildRequestBody(messages, tools, cfg, false);
-
-    const response = await this.retryManager.execute(async () => {
-      return this.retryManager.withTimeout(
-        () => this.makeRequest(cfg, body),
-        DEFAULT_TIMEOUT_MS,
-        cfg.signal,
-      );
-    }, isRetryable);
-
-    const data = (await response.json()) as ChatCompletionResponse;
-
-    if (!data.choices || data.choices.length === 0) {
-      throw new Error('No choices returned from API');
-    }
-
-    const choice = data.choices[0];
-    const message = choice.message;
-
-    const result: ChatMessage = {
-      role: 'assistant',
-      content: message.content,
-    };
-
-    if (message.tool_calls) {
-      result.tool_calls = message.tool_calls.map((tc) => ({
-        id: tc.id,
-        name: tc.function.name,
-        arguments: this.parseArguments(tc.function.arguments),
-      }));
-    }
-
-    if (message.reasoning_content) {
-      result.reasoning_content = message.reasoning_content;
-    }
-
-    return result;
-  }
-
   async chatStream(
     messages: ChatMessage[],
     tools?: ToolDefinition[],
@@ -114,7 +45,7 @@ export class DeepSeekClient {
 
     const response = await this.retryManager.execute(async () => {
       return this.retryManager.withTimeout(
-        () => this.makeRequest(cfg, body),
+        (signal) => this.makeRequest(cfg, body, signal),
         DEFAULT_TIMEOUT_MS,
         cfg.signal,
       );
@@ -129,41 +60,41 @@ export class DeepSeekClient {
 
   private async *createStreamIterable(body: unknown): AsyncIterable<StreamChunk> {
     const handler = new StreamHandler();
+    const decoder = new TextDecoder();
     let buffer = '';
     const stream = body as AsyncIterable<Uint8Array>;
 
     for await (const chunk of stream) {
-      const text = typeof chunk === 'string' ? chunk : new TextDecoder().decode(chunk);
-      buffer += text;
+      buffer += decoder.decode(chunk, { stream: true });
 
       const lines = buffer.split('\n');
       buffer = lines.pop() ?? '';
 
       for (const line of lines) {
         const trimmed = line.trim();
-        if (!trimmed || trimmed.startsWith(':')) {
-          continue;
-        }
+        if (!trimmed || trimmed.startsWith(':')) continue;
 
         if (trimmed.startsWith('data: ')) {
-          const data = trimmed.slice(6);
-          const result = handler.handleEvent('message', data);
+          const data = trimmed.slice(6).trim();
+          if (data === '[DONE]') {
+            yield { type: 'done' };
+            return;
+          }
+          const result = handler.handleEvent(data);
           if (result) {
             if (Array.isArray(result)) { for (const r of result) yield r; }
             else yield result;
           }
-        } else if (trimmed === 'data: [DONE]') {
-          yield { type: 'done' };
-          return;
         }
       }
     }
 
-    if (buffer.trim()) {
-      const trimmed = buffer.trim();
-      if (trimmed.startsWith('data: ')) {
-        const data = trimmed.slice(6);
-        const result = handler.handleEvent('message', data);
+    buffer += decoder.decode();
+    const remaining = buffer.trim();
+    if (remaining.startsWith('data: ')) {
+      const data = remaining.slice(6).trim();
+      if (data !== '[DONE]') {
+        const result = handler.handleEvent(data);
         if (result) {
           if (Array.isArray(result)) { for (const r of result) yield r; }
           else yield result;
@@ -189,6 +120,9 @@ export class DeepSeekClient {
           role: m.role,
           content: m.content,
         };
+        if (m.reasoning_content || m.thinking) {
+          msg.reasoning_content = m.reasoning_content || m.thinking;
+        }
         if (m.tool_calls) {
           msg.tool_calls = m.tool_calls.map((tc) => ({
             id: tc.id,
@@ -207,13 +141,6 @@ export class DeepSeekClient {
         } else if (m.name) {
           msg.name = m.name;
         }
-        const rc = m.reasoning_content || m.thinking;
-        if (rc) msg.reasoning_content = rc;
-        return msg;
-      }).map((msg) => {
-        if (msg.role === 'tool' && !msg.name) {
-          (msg as Record<string, unknown>).name = 'tool';
-        }
         return msg;
       }),
       temperature: config.temperature,
@@ -222,9 +149,9 @@ export class DeepSeekClient {
     };
 
     if (config.think?.enabled) {
-      (body as Record<string, unknown>).thinking = {
+      (body as unknown as Record<string, unknown>).thinking = {
         type: 'enabled',
-        budget_tokens: config.think.budgetTokens,
+        budget_tokens: Math.min(config.think.budgetTokens, config.maxTokens),
       };
     }
 
@@ -249,7 +176,7 @@ export class DeepSeekClient {
     });
   }
 
-  private async makeRequest(config: DeepSeekConfig, body: string): Promise<Response> {
+  private async makeRequest(config: DeepSeekConfig, body: string, signal?: AbortSignal): Promise<Response> {
     const url = `${config.baseUrl}/v1/chat/completions`;
 
     logger.debug('DeepSeek API request', { url, model: config.model });
@@ -264,8 +191,9 @@ export class DeepSeekClient {
       body,
     };
 
-    if (config.signal) {
-      fetchOpts.signal = config.signal;
+    const effectiveSignal = signal || config.signal;
+    if (effectiveSignal) {
+      fetchOpts.signal = effectiveSignal;
     }
 
     const response = await fetch(url, fetchOpts);
@@ -281,14 +209,6 @@ export class DeepSeekClient {
     }
 
     return response;
-  }
-
-  private parseArguments(argsStr: string): Record<string, unknown> {
-    try {
-      return JSON.parse(argsStr) as Record<string, unknown>;
-    } catch {
-      return {};
-    }
   }
 
   private mergeConfig(overrides?: Partial<DeepSeekConfig>): DeepSeekConfig {

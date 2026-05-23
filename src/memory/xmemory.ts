@@ -61,7 +61,7 @@ function saveStats(s: XMemStats): void {
 
 function tokenize(text: string): string[] {
   const lower = text.toLowerCase();
-  const words = lower.split(/[\s\p{P}\p{S}]+/).filter(w => w.length >= 2);
+  const words = lower.split(/[\s\p{Z}\p{P}]+/u).filter(w => w.length >= 2);
   const bigrams: string[] = [];
   for (let i = 0; i < words.length - 1; i++) bigrams.push(words[i] + '_' + words[i + 1]);
   return [...new Set([...words, ...bigrams])];

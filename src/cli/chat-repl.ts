@@ -351,8 +351,7 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
         }
         const targetFile = join(SESSION_DIR, `sess_${arg}.json`);
         if (existsSync(targetFile)) {
-          const { unlinkSync: us } = await import('node:fs');
-          us(targetFile);
+          unlinkSync(targetFile);
           O(g(`已删除: ${arg}\n\n`));
         } else {
           O(r(`  会话不存在: ${arg}\n\n`));
@@ -673,7 +672,7 @@ async function runLoop(
           if (fc === t) {
             if (showingThink) { showingThink = false; stopStreamAnim(); }
             Oflush(); O('\r' + ' '.repeat(cols) + '\r');
-            if (!fc.slice(t.length - t.length)) O(b(c('●')) + ' ');
+            if (fc.length === t.length) O(b(c('●')) + ' ');
           }
           const rendered = md.feed(t);
           if (rendered) O(rendered);
@@ -968,15 +967,13 @@ After writing or editing code files, ALWAYS verify the changes:
   for (const m of history.slice(-30)) {
     const e: Record<string, unknown> = { role: m.role };
     if (m.content != null) e.content = (m.content || '').slice(0, 8000);
-    if (m.reasoning_content) e.reasoning_content = (m.reasoning_content || '').slice(0, 2000);
+    if (m.reasoning_content) e.reasoning_content = (String(m.reasoning_content)).slice(0, 2000);
     if (m.tool_calls) e.tool_calls = m.tool_calls.map(t => ({
       id: t.id, type: 'function', function: { name: t.name, arguments: JSON.stringify(t.arguments) },
     }));
     if (m.tool_call_id) e.tool_call_id = m.tool_call_id;
     if (m.role === 'tool') {
       e.name = m.name || 'tool';
-    } else if (m.name) {
-      e.name = m.name;
     }
     r.push(e);
   }
@@ -1283,7 +1280,7 @@ async function callApi(
     baseUrl: opts.baseUrl || 'https://api.deepseek.com',
     temperature: opts.temperature ?? 0,
     maxTokens: cmt,
-    think: { enabled: true, budgetTokens: cmt },
+    think: { enabled: opts.thinkEnabled ?? true, budgetTokens: Math.min(cmt, opts.thinkBudget || 16000) },
     signal,
   });
   const chatMsgs: ChatMessage[] = msgs.map(m => ({
@@ -1293,7 +1290,6 @@ async function callApi(
     tool_call_id: m.tool_call_id as string | undefined,
     name: m.name as string | undefined,
     reasoning_content: m.reasoning_content as string | undefined,
-    thinking: m.thinking as string | undefined,
   }));
   const stream = await client.chatStream(chatMsgs, tools.map(t => ({
     name: t.function.name,

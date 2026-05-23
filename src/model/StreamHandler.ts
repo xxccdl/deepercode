@@ -1,12 +1,6 @@
 import type { ToolCall } from '../tools/tool-types.js';
 import type { StreamChunk } from './types.js';
 
-interface ParsedSSEEvent {
-  data: string;
-  event?: string;
-  id?: string;
-}
-
 interface PendingToolCall {
   id: string;
   name: string;
@@ -38,24 +32,7 @@ export class StreamHandler {
     this.lastYieldedIndex = -1;
   }
 
-  handleEvent(event: string, data: string): StreamChunk | StreamChunk[] | null {
-    if (event === 'error') {
-      return { type: 'error', error: data || 'SSE error event' };
-    }
-
-    if (event === '[DONE]' || data === '[DONE]') {
-      const results = this.finalizePendingToolCalls();
-      this.finished = true;
-      if (results.length > 0) {
-        return [...results, { type: 'done' } as StreamChunk];
-      }
-      return { type: 'done' };
-    }
-
-    if (!data) {
-      return null;
-    }
-
+  handleEvent(data: string): StreamChunk | StreamChunk[] | null {
     try {
       const parsed = JSON.parse(data) as Record<string, unknown>;
       const choices = parsed.choices as Array<Record<string, unknown>> | undefined;
@@ -66,65 +43,65 @@ export class StreamHandler {
 
       const choice = choices[0];
       const delta = choice.delta as Record<string, unknown> | undefined;
+      const finishReason = choice.finish_reason as string | undefined;
 
       if (!delta) {
-        const finishReason = choice.finish_reason as string | undefined;
         if (finishReason === 'stop' || finishReason === 'length' || finishReason === 'tool_calls') {
-          const results = this.finalizePendingToolCalls();
-          this.finished = true;
-          if (results.length > 0) {
-            return [...results, { type: 'done' } as StreamChunk];
-          }
-          return { type: 'done' };
+          return this.doFinish();
         }
         return null;
       }
 
+      const results: StreamChunk[] = [];
+
       if (delta.reasoning_content) {
-        const thinkingChunk = delta.reasoning_content as string;
-        this.thinkingBuffer += thinkingChunk;
+        const chunk = delta.reasoning_content as string;
+        this.thinkingBuffer += chunk;
         if (this.thinkingBuffer.length > 100_000) {
           this.thinkingBuffer = this.thinkingBuffer.slice(-80_000);
         }
-        return {
-          type: 'thinking',
-          content: thinkingChunk,
-        };
+        results.push({ type: 'thinking', content: chunk });
       }
 
       if (delta.tool_calls) {
-        return this.handleToolCallsDelta(delta.tool_calls as Array<Record<string, unknown>>);
+        const tcResults = this.handleToolCallsDelta(delta.tool_calls as Array<Record<string, unknown>>);
+        results.push(...tcResults);
       }
 
       if (delta.content) {
-        const textChunk = delta.content as string;
-        this.textBuffer += textChunk;
+        const chunk = delta.content as string;
+        this.textBuffer += chunk;
         if (this.textBuffer.length > 500_000) {
           this.textBuffer = this.textBuffer.slice(-400_000);
         }
-        return {
-          type: 'text',
-          content: textChunk,
-        };
+        results.push({ type: 'text', content: chunk });
       }
 
-      const finishReason = choice.finish_reason as string | undefined;
       if (finishReason === 'stop' || finishReason === 'length' || finishReason === 'tool_calls') {
-        const results = this.finalizePendingToolCalls();
-        this.finished = true;
-        if (results.length > 0) {
-          return [...results, { type: 'done' } as StreamChunk];
+        const finishResults = this.doFinish();
+        if (Array.isArray(finishResults)) {
+          results.push(...finishResults);
+        } else {
+          results.push(finishResults);
         }
-        return { type: 'done' };
       }
+
+      return results.length > 0 ? results : null;
     } catch {
       return {
         type: 'error',
         error: `Failed to parse SSE data: ${data.slice(0, 200)}`,
       };
     }
+  }
 
-    return null;
+  private doFinish(): StreamChunk | StreamChunk[] {
+    const results = this.finalizePendingToolCalls();
+    this.finished = true;
+    if (results.length > 0) {
+      return [...results, { type: 'done' } as StreamChunk];
+    }
+    return { type: 'done' };
   }
 
   getAccumulatedText(): string {
@@ -176,15 +153,9 @@ export class StreamHandler {
 
       const existing = this.toolCallBuffer.get(index)!;
 
-      if (id) {
-        existing.id = id;
-      }
-      if (fn?.name) {
-        existing.name = fn.name as string;
-      }
-      if (fn?.arguments) {
-        existing.argsStr += fn.arguments as string;
-      }
+      if (id) existing.id = id;
+      if (fn?.name) existing.name = fn.name as string;
+      if (fn?.arguments) existing.argsStr += fn.arguments as string;
 
       if (!existing.started) {
         existing.started = true;
@@ -240,12 +211,15 @@ export class StreamHandler {
     } catch {
       const trimmed = argsStr.trim();
       if (trimmed.startsWith('{') && !trimmed.endsWith('}')) {
-        try {
-          return JSON.parse(trimmed + '}') as Record<string, unknown>;
-        } catch {
-          try {
-            return JSON.parse(trimmed + '}}') as Record<string, unknown>;
-          } catch {}
+        let closing = '';
+        let depth = 0;
+        for (const ch of trimmed) {
+          if (ch === '{') depth++;
+          else if (ch === '}') depth--;
+        }
+        while (depth > 0) { closing += '}'; depth--; }
+        if (closing) {
+          try { return JSON.parse(trimmed + closing) as Record<string, unknown>; } catch {}
         }
       }
       return {};
