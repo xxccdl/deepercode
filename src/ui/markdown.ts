@@ -129,7 +129,8 @@ export class MarkdownStreamRenderer {
     const colWidths: number[] = Array(colCount).fill(3);
     for (const row of allRows) {
       for (let i = 0; i < row.length; i++) {
-        const w = this.visualLen(row[i]);
+        const rendered = this.inline(row[i]);
+        const w = this.visualLen(rendered);
         if (w > colWidths[i]) colWidths[i] = Math.min(w, 30);
       }
     }
