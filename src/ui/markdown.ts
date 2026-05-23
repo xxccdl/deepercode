@@ -184,33 +184,30 @@ export class MarkdownStreamRenderer {
   private visualLen(s: string): number {
     const plain = this.stripMarkdown(s).replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
     let len = 0;
-    for (const ch of plain) {
-      const cp = ch.codePointAt(0) || 0;
-      // Fullwidth / Wide / Emoji = 2 columns
-      if (cp >= 0x1100 && cp <= 0x115F) { len += 2; continue; }           // Hangul Jamo
-      if (cp >= 0x2E80 && cp <= 0xA4CF) { len += 2; continue; }           // CJK
-      if (cp >= 0xAC00 && cp <= 0xD7A3) { len += 2; continue; }           // Hangul Syllables
-      if (cp >= 0xF900 && cp <= 0xFAFF) { len += 2; continue; }           // CJK Compatibility
-      if (cp >= 0xFE10 && cp <= 0xFE19) { len += 2; continue; }           // Vertical forms
-      if (cp >= 0xFE30 && cp <= 0xFE6F) { len += 2; continue; }           // CJK Compatibility Forms
-      if (cp >= 0xFF00 && cp <= 0xFF60) { len += 2; continue; }           // Fullwidth ASCII
-      if (cp >= 0xFFE0 && cp <= 0xFFE6) { len += 2; continue; }           // Fullwidth symbols
-      if (cp >= 0x20000 && cp <= 0x2FFFD) { len += 2; continue; }         // CJK Extension B+
-      if (cp >= 0x30000 && cp <= 0x3FFFD) { len += 2; continue; }         // CJK Extension C+
-      if (cp >= 0x1F300 && cp <= 0x1F9FF) { len += 2; continue; }         // Emoji
-      if (cp >= 0x1F000 && cp <= 0x1F2FF) { len += 2; continue; }         // Emoji misc
-      if (cp >= 0x2600 && cp <= 0x26FF) { len += 2; continue; }           // Misc symbols
-      if (cp >= 0x2700 && cp <= 0x27BF) { len += 2; continue; }           // Dingbats
-      if (cp === 0x00A1 || cp === 0x00A4 || cp === 0x00A7 || cp === 0x00A8 || cp === 0x00AA || cp === 0x00AD || cp === 0x00AE || cp === 0x00B0 || cp === 0x00B1 || cp === 0x00B4 || cp === 0x00B6 || cp === 0x00B8 || cp === 0x00BA || cp === 0x00BC || cp === 0x00BD || cp === 0x00BE || cp === 0x00BF || cp === 0x00C6 || cp === 0x00D0 || cp === 0x00D7 || cp === 0x00D8 || cp === 0x00DE || cp === 0x00DF || cp === 0x00E0 || cp === 0x00E1 || cp === 0x00E6 || cp === 0x00E8 || cp === 0x00E9 || cp === 0x00EC || cp === 0x00ED || cp === 0x00F0 || cp === 0x00F2 || cp === 0x00F3 || cp === 0x00F7 || cp === 0x00F8 || cp === 0x00F9 || cp === 0x00FA || cp === 0x00FC || cp === 0x00FD || cp === 0x00FE || cp === 0x0101 || cp === 0x0111 || cp === 0x0113 || cp === 0x011B || cp === 0x0126 || cp === 0x0127 || cp === 0x012B || cp === 0x0131 || cp === 0x0133 || cp === 0x0138 || cp === 0x013F || cp === 0x0141 || cp === 0x0144 || cp === 0x0148 || cp === 0x014D || cp === 0x0152 || cp === 0x0153 || cp === 0x0166 || cp === 0x0167 || cp === 0x016B || cp === 0x01CE || cp === 0x01D0 || cp === 0x01D2 || cp === 0x01D4 || cp === 0x01D6 || cp === 0x01D8 || cp === 0x01DA || cp === 0x01DC || cp === 0x0251 || cp === 0x0261) { len += 2; continue; }
-      // Halfwidth Katakana = 1
-      if (cp >= 0xFF61 && cp <= 0xFF9F) { len += 1; continue; }
-      // Combining marks = 0
-      if (cp >= 0x0300 && cp <= 0x036F) { len += 0; continue; }
-      if (cp >= 0x1DC0 && cp <= 0x1DFF) { len += 0; continue; }
-      if (cp >= 0x20D0 && cp <= 0x20FF) { len += 0; continue; }
-      if (cp >= 0xFE20 && cp <= 0xFE2F) { len += 0; continue; }
-      // Default: ASCII and most others = 1
-      len += 1;
+    for (const cp of [...plain].map(ch => ch.codePointAt(0) || 0)) {
+      if ((cp >= 0x1100 && cp <= 0x115F) ||    // Hangul Jamo
+          (cp >= 0x2E80 && cp <= 0xA4CF) ||    // CJK
+          (cp >= 0xAC00 && cp <= 0xD7A3) ||    // Hangul Syllables
+          (cp >= 0xF900 && cp <= 0xFAFF) ||    // CJK Compatibility
+          (cp >= 0xFE10 && cp <= 0xFE19) ||    // Vertical forms
+          (cp >= 0xFE30 && cp <= 0xFE6F) ||    // CJK Compatibility Forms
+          (cp >= 0xFF00 && cp <= 0xFF60) ||    // Fullwidth ASCII
+          (cp >= 0xFFE0 && cp <= 0xFFE6) ||    // Fullwidth symbols
+          (cp >= 0x20000 && cp <= 0x2FFFD) ||  // CJK Extension B+
+          (cp >= 0x30000 && cp <= 0x3FFFD) ||  // CJK Extension C+
+          (cp >= 0x1F300 && cp <= 0x1F9FF) ||  // Emoji
+          (cp >= 0x1F000 && cp <= 0x1F2FF) ||  // Emoji misc
+          (cp >= 0x2600 && cp <= 0x26FF) ||    // Misc symbols
+          (cp >= 0x2700 && cp <= 0x27BF)) {     // Dingbats
+        len += 2;
+      } else if ((cp >= 0x0300 && cp <= 0x036F) ||  // Combining marks → 0 width
+                 (cp >= 0x1DC0 && cp <= 0x1DFF) ||
+                 (cp >= 0x20D0 && cp <= 0x20FF) ||
+                 (cp >= 0xFE20 && cp <= 0xFE2F)) {
+        continue;
+      } else {
+        len += 1;
+      }
     }
     return len;
   }
