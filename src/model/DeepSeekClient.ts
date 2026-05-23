@@ -132,7 +132,7 @@ export class DeepSeekClient {
             type: 'function',
             function: {
               name: tc.name,
-              arguments: JSON.stringify(tc.arguments),
+              arguments: typeof tc.arguments === 'string' ? tc.arguments : JSON.stringify(tc.arguments),
             },
           }));
         }
@@ -170,30 +170,39 @@ export class DeepSeekClient {
       body.tool_choice = 'auto';
     }
 
-    for (const m of body.messages as Array<Record<string, unknown>>) {
-      if (m.role === 'tool' && !m.name) {
-        const id = m.tool_call_id ? String(m.tool_call_id).slice(0, 20) : '?';
-        logger.warn(`[SAFETY] tool message missing name (tool_call_id=${id}), injecting 'tool'`);
-        m.name = 'tool';
+    let raw = JSON.stringify(body);
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return raw;
+    }
+
+    const msgs = parsed.messages as Array<Record<string, unknown>> | undefined;
+    if (msgs) {
+      let fixedCount = 0;
+      for (let i = 0; i < msgs.length; i++) {
+        const m = msgs[i];
+        if (m.role === 'tool' && !m.name) {
+          m.name = m.tool_call_id || 'tool';
+          logger.warn(`[SAFETY] parse-fix messages[${i}] tool missing name → "${m.name}"`);
+          fixedCount++;
+        }
+        if (m.role === 'assistant' && m.tool_calls && !m.name) {
+          m.name = 'assistant';
+          logger.warn(`[SAFETY] parse-fix messages[${i}] assistant+tool_calls missing name → "assistant"`);
+          fixedCount++;
+        }
+      }
+      if (fixedCount > 0) {
+        raw = JSON.stringify(parsed);
       }
     }
 
-    const raw = JSON.stringify(body);
-
-    const bodyStr = raw.replace(
-      /\{"role":"tool","content":(?:"[^"]*"|null),"tool_call_id":"[^"]*"(?!,"name":)/g,
-      (match) => {
-        const toolCallIdMatch = match.match(/"tool_call_id":"([^"]*)"/);
-        const name = toolCallIdMatch ? toolCallIdMatch[1] : 'tool';
-        logger.warn(`[SAFETY] JSON-level fix: injecting name="${name}" for tool message`);
-        return match + `,"name":"${name}"`;
-      }
-    );
-
     const lastReqFile = join(DEEPER_HOME!, 'last_request.json');
-    try { writeFileSync(lastReqFile, bodyStr, 'utf-8'); } catch {}
+    try { writeFileSync(lastReqFile, raw, 'utf-8'); } catch {}
 
-    return bodyStr;
+    return raw;
   }
 
   private async makeRequest(config: DeepSeekConfig, body: string, signal?: AbortSignal): Promise<Response> {

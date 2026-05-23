@@ -1,6 +1,6 @@
 {
   "name": "deeper-cli",
-  "version": "1.3.6",
+  "version": "1.3.7",
   "description": "DeeperCode - 一句话生成完整项目的 AI Agentic CLI 工具",
   "type": "module",
   "main": "./dist/index.js",
