@@ -14,6 +14,5 @@ export default defineConfig({
   outDir: 'dist',
   splitting: false,
   skipNodeModulesBundle: true,
-  noExternal: [],
-  external: ['react', 'ink', 'diff', 'cheerio', 'csv-parse', 'csv-parse/sync', 'toml', 'open', 'ws'],
+  noExternal: ['cheerio', 'csv-parse', 'csv-parse/sync', 'diff', 'toml', 'open', 'ws'],
 });

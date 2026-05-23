@@ -1,4 +1,3 @@
-import * as cheerio from 'cheerio';
 import type { Tool } from '../../tool-types.js';
 
 export const parse_html: Tool = {
@@ -19,6 +18,7 @@ export const parse_html: Tool = {
   requiresApproval: false,
   async execute(params) {
     try {
+      const cheerio = await import('cheerio');
       let html = '';
       const url = params.url as string | undefined;
       const htmlContent = params.html as string | undefined;
