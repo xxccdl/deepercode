@@ -817,7 +817,6 @@ async function execTool(
 
   const toolStart = Date.now();
   const spinner = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏';
-  const write = (s: string) => { try { process.stdout.write(s); } catch {} };
 
   const fp = (tc.args.file_path || tc.args.path || tc.args.file || '') as string;
   const meta: string[] = [];
@@ -831,12 +830,14 @@ async function execTool(
   }
   const label = meta.length ? `${tc.name}  ${A.d}${meta.join(' · ')}${A.R}` : tc.name;
 
-  write(`\r${' '.repeat(cols)}\r ${spinner[0]} ${G(label)}     `);
-  const execAnimIv = setInterval(() => {
+  const animTick = () => {
     const el = (Date.now() - toolStart) / 1000;
     const si = Math.floor(el * 8) % 8;
-    write(`\r ${A.c}${spinner[si]}${A.R} ${G(label)}  ${A.d}${el.toFixed(1)}s${A.R}     `);
-  }, 100);
+    Oflush();
+    process.stdout.write(`\r${' '.repeat(cols)}\r ${A.c}${spinner[si]}${A.R} ${G(label)}  ${A.d}${el.toFixed(1)}s${A.R}     `);
+  };
+  animTick();
+  const execAnimIv = setInterval(animTick, 100);
 
   try {
     if (tc.name === 'write_file' || tc.name === 'edit_file') {
