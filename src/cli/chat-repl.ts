@@ -253,17 +253,17 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
   setAskUserFn(async (q) => {
     const sv = resolveLine; resolveLine = null;
     Oflush();
-    if (q.header) O(c(`\n  ? ${q.header}\n`));
+    if (q.header) process.stdout.write(c(`\n  ? ${q.header}\n`));
     if (q.options && q.options.length > 0) {
-      O(y(`  ${q.question}\n`));
+      process.stdout.write(y(`  ${q.question}\n`));
       for (let i = 0; i < q.options.length; i++) {
-        O(G(`    ${i + 1}. ${q.options[i]}\n`));
+        process.stdout.write(G(`    ${i + 1}. ${q.options[i]}\n`));
       }
       const hint = q.multiSelect ? '多个编号，空格分隔' : '输入编号';
-      O(G(`  ${hint}: `));
+      process.stdout.write(G(`  ${hint}: `));
     } else {
-      O(y(`  ${q.question}\n`));
-      O(G('  > '));
+      process.stdout.write(y(`  ${q.question}\n`));
+      process.stdout.write(G('  > '));
     }
     const a = await new Promise<string>(r2 => { resolveLine = r2; rl.prompt(true); });
     if (q.options && q.options.length > 0) {
