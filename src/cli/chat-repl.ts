@@ -689,7 +689,7 @@ async function runLoop(
           if (tc) {
             curTc = { id: tc.id, name: tc.name, argsStr: '' };
             Oflush(); O('\r' + ' '.repeat(cols) + '\r');
-            O(c(' ⏳ ') + G(tc.name));
+            O(G(tc.name) + ' ');
           }
         }
         if (chunk.type === 'tool_call_end' && curTc) {
@@ -816,21 +816,22 @@ async function execTool(
 
   const toolStart = Date.now();
   const spinner = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏';
-  const rawWrite = (s: string) => { try { process.stdout.write(s); } catch {} };
-  Oflush(); O('\r' + ' '.repeat(cols) + '\r');
-  O(` ${spinner[0]} ` + G(toolName));
+  const write = (s: string) => { try { process.stdout.write(s); } catch {} };
 
-  const showAnim = () => {
+  const fp = (tc.args.file_path || tc.args.path || tc.args.file || '') as string;
+  const label = (tc.name === 'write_file' || tc.name === 'edit_file') && fp
+    ? `${tc.name} → ${fp.split(/[/\\]/).filter(Boolean).slice(-2).join('/')}`
+    : tc.name;
+
+  write(`\r${' '.repeat(cols)}\r ${spinner[0]} ${G(label)}     `);
+  const execAnimIv = setInterval(() => {
     const el = (Date.now() - toolStart) / 1000;
     const si = Math.floor(el * 8) % 8;
-    rawWrite(`\r ${A.c}${spinner[si]}${A.R} ${A.G}${toolName}${A.R}  ${A.d}${el.toFixed(1)}s${A.R}     `);
-  };
-  showAnim();
-  const execAnimIv = setInterval(showAnim, 100);
+    write(`\r ${A.c}${spinner[si]}${A.R} ${G(label)}  ${A.d}${el.toFixed(1)}s${A.R}     `);
+  }, 100);
 
   try {
     if (tc.name === 'write_file' || tc.name === 'edit_file') {
-      const fp = (tc.args.file_path || tc.args.path || tc.args.file || '') as string;
       if (fp) backupFile(fp);
     }
 
@@ -852,7 +853,6 @@ async function execTool(
 
     let brief = '';
     if (tc.name === 'write_file' || tc.name === 'edit_file') {
-      const fp = (tc.args.file_path || tc.args.path || tc.args.file || '') as string;
       brief = showPath(fp);
     } else if (tc.name === 'todo_manager') {
       brief = '任务已更新';
