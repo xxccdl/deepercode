@@ -10,7 +10,7 @@ import { ToolValidator } from '../tools/ToolValidator.js';
 import { xmemory, setSessionId } from '../memory/xmemory.js';
 import { MarkdownStreamRenderer } from '../ui/markdown.js';
 import { getTodos, todoSummary } from '../tools/builtin/ai/todo_manager.js';
-import { estimateTokens } from '../tools/builtin/ai/token_count.js';
+import { estimateMessageTokens } from '../tools/builtin/ai/token_count.js';
 import { SkillEngine } from '../skills/SkillEngine.js';
 import { MCPClient } from '../mcp/MCPClient.js';
 import { DeepSeekClient } from '../model/DeepSeekClient.js';
@@ -661,13 +661,14 @@ async function runLoop(
 
   for (let iter = 0; ; iter++) {
     const cols = process.stdout.columns || 80;
-    const ctxTokens = estimateTokens(history.map(m => m.content || '').join('\n'));
-    const toolsTokenOverhead = toolDefs.length * 80;
-    const totalCtx = ctxTokens + toolsTokenOverhead;
+    let msgs = buildMsgs(history);
+    const ctxTokens = estimateMessageTokens(msgs, toolDefs.map(t => ({ type: 'function', function: { name: t.function.name, description: t.function.description, parameters: t.function.parameters } })));
+    const totalCtx = ctxTokens;
     const nearLimit = totalCtx > CONTEXT_LIMIT * 0.95;
 
     if (totalCtx > CONTEXT_LIMIT * 0.7 && history.length > 10) {
       compressHistory(history);
+      msgs = buildMsgs(history);
     }
 
     if (stagnation >= 5) {
@@ -675,7 +676,6 @@ async function runLoop(
       stagnation = 0;
     }
 
-    const msgs = buildMsgs(history);
     const st = Date.now();
     let fc = '', th = '';
     let tcs: Array<{ id: string; name: string; args: Record<string, unknown> }> = [];
