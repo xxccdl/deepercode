@@ -687,7 +687,11 @@ async function runLoop(
           if (showingThink) { O('\r' + ' '.repeat(cols) + '\r'); showingThink = false; }
           stopStreamAnim();
           const tc = (chunk as any).tool_call;
-          if (tc) curTc = { id: tc.id, name: tc.name, argsStr: '' };
+          if (tc) {
+            curTc = { id: tc.id, name: tc.name, argsStr: '' };
+            Oflush(); O('\r' + ' '.repeat(cols) + '\r');
+            O(c(' ⏳ ') + G(tc.name));
+          }
         }
         if (chunk.type === 'tool_call_end' && curTc) {
           const tcData = (chunk as any).tool_call;
@@ -744,15 +748,12 @@ async function runLoop(
         if (tdSummary) { Oflush(); O('\n' + d(tdSummary.split('\n').join('\n  ')) + '\n'); }
       }
 
-      if (safe.length > 1) {
+      if (safe.length >= 1) {
         const results = await Promise.allSettled(safe.map(async tc => { const r = await execTool(tc, tools, opts, currentAbortController!.signal); doneTools++; return r; }));
         for (const r of results) {
           if (r.status === 'fulfilled') { history.push(r.value); ttc++; GS.tc++; }
           else { history.push({ role: 'tool', content: `Error: ${String(r.reason)}`, tool_call_id: 'parallel', name: 'parallel' }); }
         }
-      } else if (safe.length === 1) {
-        const r = await execTool(safe[0], tools, opts, currentAbortController!.signal);
-        history.push(r); ttc++; GS.tc++; doneTools++;
       }
       for (const tc of rest) {
         const r2 = await execTool(tc, tools, opts, currentAbortController!.signal, confirm);
@@ -804,53 +805,48 @@ async function execTool(
 
   const s = TOOL_SAFETY_MAP[tc.name] || 'safe';
   const toolName = tc.name;
-  const tSyms = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏';
-  let ti = 0;
-
-  // Combine external signal (Ctrl+C) with internal timeout
-  const ac = new AbortController();
-  let timer: ReturnType<typeof setTimeout> | null = null;
-  const onExtAbort = () => { if (timer) clearTimeout(timer); ac.abort(); };
-  extSignal?.addEventListener('abort', onExtAbort, { once: true });
-  if (extSignal?.aborted) ac.abort();
+  const cols = process.stdout.columns || 80;
 
   if ((s === 'dangerous' || s === 'confirm') && confirm) {
-    Oflush(); O('\r' + ' '.repeat(process.stdout.columns || 80) + '\r');
+    Oflush(); O('\r' + ' '.repeat(cols) + '\r');
     const prefix = s === 'dangerous' ? '⛔' : '⚠';
     O(y(` ${prefix}确认? `));
-    if (ac.signal.aborted) return { role: 'tool', content: 'Aborted', tool_call_id: tc.id, name: tc.name };
     const ok = await confirm(`执行 ${toolName}?`);
-    if (ac.signal.aborted) return { role: 'tool', content: 'Aborted', tool_call_id: tc.id, name: tc.name };
     if (!ok) { O(G(' 跳过\n')); return { role: 'tool', content: 'User skipped', tool_call_id: tc.id, name: tc.name }; }
-    O('\r' + A.d + '  ' + A.R + A.c + tSyms[0] + A.R + A.G + ' ' + toolName + A.R + '     ');
   }
 
-  let execAnimIv: ReturnType<typeof setInterval> | null = null;
-  const stopToolAnim = () => { if (execAnimIv) { clearInterval(execAnimIv); execAnimIv = null; } };
+  const toolStart = Date.now();
+  const spinner = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏';
+  const rawWrite = (s: string) => { try { process.stdout.write(s); } catch {} };
+  Oflush(); O('\r' + ' '.repeat(cols) + '\r');
+  O(` ${spinner[0]} ` + G(toolName));
+
+  const showAnim = () => {
+    const el = (Date.now() - toolStart) / 1000;
+    const si = Math.floor(el * 8) % 8;
+    rawWrite(`\r ${A.c}${spinner[si]}${A.R} ${A.G}${toolName}${A.R}  ${A.d}${el.toFixed(1)}s${A.R}     `);
+  };
+  showAnim();
+  const execAnimIv = setInterval(showAnim, 100);
+
   try {
-    const toolStart = Date.now();
-    const rawWrite = (s: string) => { try { process.stdout.write(s); } catch {} };
-    rawWrite('\r' + thinkingAnimAt(toolName, toolStart));
-    execAnimIv = setInterval(() => { rawWrite('\r' + thinkingAnimAt(toolName, toolStart)); }, 80);
-
-    const timeout = TOOL_TIMEOUT_MAP[tc.name] || DEFAULT_TOOL_TIMEOUT;
-    timer = setTimeout(() => ac.abort(), timeout);
-
     if (tc.name === 'write_file' || tc.name === 'edit_file') {
       const fp = (tc.args.file_path || tc.args.path || tc.args.file || '') as string;
       if (fp) backupFile(fp);
     }
 
+    const timeout = TOOL_TIMEOUT_MAP[tc.name] || DEFAULT_TOOL_TIMEOUT;
+    const timeoutSignal = AbortSignal.timeout(timeout);
+    const mergedSignal = extSignal ? AbortSignal.any([extSignal, timeoutSignal]) : timeoutSignal;
+
     let result: { success: boolean; error?: string; output?: string };
     try {
-      result = await tool.execute(tc.args, ac.signal) as any;
+      result = await tool.execute(tc.args, mergedSignal) as any;
     } catch (e: unknown) {
       result = { success: false, error: (e as Error).message, output: '' };
     }
-    clearTimeout(timer);
-    timer = null;
 
-    stopToolAnim();
+    clearInterval(execAnimIv);
     const rawResult = result.success ? result.output || '' : `Error: ${result.error || 'failed'}`;
     const text = result.success ? sanitize(rawResult).slice(0, TOOL_RESULT_MAX) : `Error: ${result.error || 'failed'}`;
     const showPath = (p: string) => p.split(/[/\\]/).filter(Boolean).slice(-2).join('/').slice(-35);
@@ -864,7 +860,7 @@ async function execTool(
     } else {
       brief = rawResult.replace(/\n/g, ' ').slice(0, 60);
     }
-    Oflush(); O('\r' + ' '.repeat(process.stdout.columns || 80) + '\r');
+    Oflush(); O('\r' + ' '.repeat(cols) + '\r');
     if (tc.name === 'todo_manager' && result.success) {
       O(A.y + A.b + '  ▸▸ █ 任务面板' + A.R + '\n');
       const lines = rawResult.split('\n').filter(Boolean);
@@ -901,9 +897,9 @@ async function execTool(
 
     return { role: 'tool', content: text, tool_call_id: tc.id, name: tc.name };
   } catch (e: unknown) {
-    stopToolAnim();
+    clearInterval(execAnimIv);
     const em = e instanceof Error ? e.message : String(e);
-    Oflush(); O('\r' + ' '.repeat(process.stdout.columns || 80) + '\r');
+    Oflush(); O('\r' + ' '.repeat(cols) + '\r');
     O(r(' ✗') + G(` ${tc.name} ${em.slice(0, 60)}\n`));
     return { role: 'tool', content: `Error: ${em}`, tool_call_id: tc.id, name: tc.name };
   }
