@@ -730,6 +730,10 @@ async function runLoop(
     if (tcs.length > 0) {
       stagnation = 0;
       Oflush();
+      currentAbortController = new AbortController();
+      const safe = tcs.filter(t => (TOOL_SAFETY_MAP[t.name] || 'safe') === 'safe');
+      const rest = tcs.filter(t => (TOOL_SAFETY_MAP[t.name] || 'safe') !== 'safe');
+      try {
       const compactFc = fc && fc.length > 500 ? fc.replace(/\n/g, ' ').slice(0, 300) + '…' : fc;
       history.push({ role: 'assistant', content: compactFc || null, reasoning_content: th || undefined, tool_calls: tcs.map(t => ({ id: t.id, name: t.name, arguments: { ...t.args } })) });
       fc = ''; th = '';
@@ -740,27 +744,31 @@ async function runLoop(
         if (tdSummary) { Oflush(); O('\n' + d(tdSummary.split('\n').join('\n  ')) + '\n'); }
       }
 
-      const safe = tcs.filter(t => (TOOL_SAFETY_MAP[t.name] || 'safe') === 'safe');
-      const rest = tcs.filter(t => (TOOL_SAFETY_MAP[t.name] || 'safe') !== 'safe');
       if (safe.length > 1) {
-        const results = await Promise.allSettled(safe.map(async tc => { const r = await execTool(tc, tools, opts); doneTools++; return r; }));
+        const results = await Promise.allSettled(safe.map(async tc => { const r = await execTool(tc, tools, opts, currentAbortController!.signal); doneTools++; return r; }));
         for (const r of results) {
           if (r.status === 'fulfilled') { history.push(r.value); ttc++; GS.tc++; }
           else { history.push({ role: 'tool', content: `Error: ${String(r.reason)}`, tool_call_id: 'parallel', name: 'parallel' }); }
         }
       } else if (safe.length === 1) {
-        const r = await execTool(safe[0], tools, opts);
+        const r = await execTool(safe[0], tools, opts, currentAbortController!.signal);
         history.push(r); ttc++; GS.tc++; doneTools++;
       }
       for (const tc of rest) {
-        const r2 = await execTool(tc, tools, opts, confirm);
+        const r2 = await execTool(tc, tools, opts, currentAbortController!.signal, confirm);
         history.push(r2); if (!r2.content?.startsWith('Error:') && !r2.content?.includes('skipped')) { ttc++; GS.tc++; }
         doneTools++;
       }
+      } catch {
+        O(y('\n  ⚡ 已中断工具执行\n'));
+      }
       tcs.length = 0; safe.length = 0; rest.length = 0;
+      currentAbortController = null;
 
       trimHistory(history, MAX_HISTORY); continue;
     }
+
+    currentAbortController = null;
 
     if (fc) { history.push({ role: 'assistant', content: fc, reasoning_content: th || undefined }); stagnation = 0; }
     else { stagnation++; }
@@ -783,6 +791,7 @@ async function runLoop(
 async function execTool(
   tc: { id: string; name: string; args: Record<string, unknown> },
   tools: Tool[], opts: ReplOptions,
+  extSignal?: AbortSignal,
   confirm?: (msg: string) => Promise<boolean>,
 ): Promise<Message> {
   const tool = tools.find(t => t.name === tc.name);
@@ -798,11 +807,20 @@ async function execTool(
   const tSyms = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏';
   let ti = 0;
 
+  // Combine external signal (Ctrl+C) with internal timeout
+  const ac = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const onExtAbort = () => { if (timer) clearTimeout(timer); ac.abort(); };
+  extSignal?.addEventListener('abort', onExtAbort, { once: true });
+  if (extSignal?.aborted) ac.abort();
+
   if ((s === 'dangerous' || s === 'confirm') && confirm) {
     Oflush(); O('\r' + ' '.repeat(process.stdout.columns || 80) + '\r');
     const prefix = s === 'dangerous' ? '⛔' : '⚠';
     O(y(` ${prefix}确认? `));
+    if (ac.signal.aborted) return { role: 'tool', content: 'Aborted', tool_call_id: tc.id, name: tc.name };
     const ok = await confirm(`执行 ${toolName}?`);
+    if (ac.signal.aborted) return { role: 'tool', content: 'Aborted', tool_call_id: tc.id, name: tc.name };
     if (!ok) { O(G(' 跳过\n')); return { role: 'tool', content: 'User skipped', tool_call_id: tc.id, name: tc.name }; }
     O('\r' + A.d + '  ' + A.R + A.c + tSyms[0] + A.R + A.G + ' ' + toolName + A.R + '     ');
   }
@@ -816,8 +834,7 @@ async function execTool(
     execAnimIv = setInterval(() => { rawWrite('\r' + thinkingAnimAt(toolName, toolStart)); }, 80);
 
     const timeout = TOOL_TIMEOUT_MAP[tc.name] || DEFAULT_TOOL_TIMEOUT;
-    const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), timeout);
+    timer = setTimeout(() => ac.abort(), timeout);
 
     if (tc.name === 'write_file' || tc.name === 'edit_file') {
       const fp = (tc.args.file_path || tc.args.path || tc.args.file || '') as string;
@@ -827,11 +844,11 @@ async function execTool(
     let result: { success: boolean; error?: string; output?: string };
     try {
       result = await tool.execute(tc.args, ac.signal) as any;
-      clearTimeout(timer);
     } catch (e: unknown) {
-      clearTimeout(timer);
       result = { success: false, error: (e as Error).message, output: '' };
     }
+    clearTimeout(timer);
+    timer = null;
 
     stopToolAnim();
     const rawResult = result.success ? result.output || '' : `Error: ${result.error || 'failed'}`;
