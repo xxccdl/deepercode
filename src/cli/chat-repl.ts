@@ -52,6 +52,7 @@ const TOOL_TIMEOUT_MAP: Record<string, number> = {
   sql_query: 60_000, sql_migrate: 120_000, db_backup: 180_000, db_restore: 180_000,
   secret_scan: 60_000, vulnerability_check: 60_000,
   subagent: 180_000,
+  ask_user: 120_000,
 };
 const DEFAULT_TOOL_TIMEOUT = 30_000;
 
@@ -90,7 +91,7 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
   const tools = await loadBuiltinTools();
   const toolDefs = toolsToDefs(tools);
 
-  const { setSubagentRunner } = await import('../tools/builtin/index.js');
+  const { setSubagentRunner, setAskUserFn } = await import('../tools/builtin/index.js');
   setSubagentRunner(async (task: string, mode: 'foreground' | 'background') => {
     const isBg = mode === 'background';
     const run = async () => {
@@ -248,6 +249,38 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
     if (sv) resolveLine = sv; else showPrompt();
     return ok;
   };
+
+  setAskUserFn(async (q) => {
+    const sv = resolveLine; resolveLine = null;
+    Oflush();
+    if (q.header) O(c(`\n  ? ${q.header}\n`));
+    if (q.options && q.options.length > 0) {
+      O(y(`  ${q.question}\n`));
+      for (let i = 0; i < q.options.length; i++) {
+        O(G(`    ${i + 1}. ${q.options[i]}\n`));
+      }
+      const hint = q.multiSelect ? '多个编号，空格分隔' : '输入编号';
+      O(G(`  ${hint}: `));
+    } else {
+      O(y(`  ${q.question}\n`));
+      O(G('  > '));
+    }
+    const a = await new Promise<string>(r2 => { resolveLine = r2; rl.prompt(true); });
+    if (q.options && q.options.length > 0) {
+      if (q.multiSelect) {
+        const idxs = a.split(/\s+/).map(s => parseInt(s, 10)).filter(n => n >= 1 && n <= q.options!.length);
+        const selected = idxs.map(i => q.options![i - 1]);
+        if (sv) { resolveLine = sv; } else { showPrompt(); }
+        return selected.length > 0 ? `已选择: ${selected.join(', ')}` : '(未选择)';
+      }
+      const idx = parseInt(a, 10);
+      if (sv) { resolveLine = sv; } else { showPrompt(); }
+      if (idx >= 1 && idx <= q.options.length) return `已选择: ${q.options[idx - 1]}`;
+      return `无效选择: ${a}`;
+    }
+    if (sv) { resolveLine = sv; } else { showPrompt(); }
+    return a.trim() || '(未回答)';
+  });
 
   const onSigint = () => {
     if (currentAbortController) {
@@ -914,6 +947,8 @@ async function execTool(
       brief = showPath(fp);
     } else if (tc.name === 'todo_manager') {
       brief = '任务已更新';
+    } else if (tc.name === 'ask_user') {
+      brief = rawResult.slice(0, 80);
     } else {
       brief = rawResult.replace(/\n/g, ' ').slice(0, 60);
     }
@@ -942,6 +977,8 @@ async function execTool(
         else O('  ' + colored + '\n');
       }
       O('\n');
+    } else if (tc.name === 'ask_user') {
+      O(y(' ?') + G(` ${c(tc.name)} ${brief}\n`));
     } else {
       O(g(' ✓') + G(` ${c(tc.name)} ${brief}\n`));
     }
@@ -977,6 +1014,7 @@ function buildMsgs(history: Message[]): Array<Record<string, unknown>> {
 6. VERIFY AFTER WRITE — After writing code, run type checks, linters, or tests to confirm correctness.
 7. FIX ERRORS PROACTIVELY — If a tool returns an error, diagnose and fix it immediately.
 8. PARALLEL WHEN POSSIBLE — Execute independent tool calls simultaneously for efficiency.
+9. ASK WHEN UNSURE — Use ask_user tool to clarify ambiguous requirements, choices (styles, frameworks, naming), or confirm destructive actions. Never guess critical decisions.
 
 ## Smart Editing Strategy
 - For EXISTING files, prefer edit_file over write_file to minimize diff size.

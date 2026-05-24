@@ -118,6 +118,7 @@ import { system_info } from './system/system_info.js';
 import { resource_monitor } from './system/resource_monitor.js';
 import { notify_user } from './system/notify_user.js';
 import { log_viewer } from './system/log_viewer.js';
+import { ask_user, setAskUserFn } from './system/ask_user.js';
 
 export const builtinTools: Tool[] = [
   read_file,
@@ -239,6 +240,7 @@ export const builtinTools: Tool[] = [
   resource_monitor,
   notify_user,
   log_viewer,
+  ask_user,
 ];
 
-export { setSubagentRunner };
+export { setSubagentRunner, setAskUserFn };

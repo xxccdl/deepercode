@@ -72,7 +72,7 @@ export const TOOL_SAFETY_MAP: Record<string, ToolSafetyLevel> = {
   db_schema: 'safe',
   context_summarize: 'safe', prompt_template: 'safe',
   skill_create: 'safe', tool_create: 'safe', memory_store: 'safe',
-  todo_manager: 'safe', subagent: 'safe',
+  todo_manager: 'safe', subagent: 'safe', ask_user: 'safe',
   background_terminal: 'safe', list_terminals: 'safe', read_terminal: 'safe',
   send_keys: 'safe', send_ctrl_keys: 'safe', send_text: 'safe', kill_terminal: 'safe',
   terminal_screenshot: 'safe', terminal_resize: 'safe', check_status: 'safe', stop_command: 'safe',
