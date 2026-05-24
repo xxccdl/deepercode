@@ -614,6 +614,7 @@ async function runLoop(
   let ttc = 0, ce = 0, stagnation = 0;
 
   for (let iter = 0; ; iter++) {
+    const cols = process.stdout.columns || 80;
     const ctxTokens = estimateTokens(history.map(m => m.content || '').join('\n'));
     const toolsTokenOverhead = toolDefs.length * 80;
     const totalCtx = ctxTokens + toolsTokenOverhead;
@@ -661,8 +662,6 @@ async function runLoop(
       const stream = await callApi(opts, msgs, toolDefs, amax, currentAbortController.signal);
       GS.api++; ce = 0;
 
-      const cols = process.stdout.columns || 80;
-
       for await (const chunk of stream) {
         if (chunk.type === 'text') {
           const t = chunk.content || '';
@@ -688,6 +687,8 @@ async function runLoop(
           const tc = (chunk as any).tool_call;
           if (tc) {
             curTc = { id: tc.id, name: tc.name, argsStr: '' };
+            Oflush(); O('\r' + ' '.repeat(cols) + '\r');
+            O(g('→') + ' ' + G(tc.name) + '\n');
           }
         }
         if (chunk.type === 'tool_call_end' && curTc) {
@@ -745,7 +746,18 @@ async function runLoop(
       }
 
       if (safe.length >= 1) {
-        const results = await Promise.allSettled(safe.map(async tc => { const r = await execTool(tc, tools, opts, currentAbortController!.signal); doneTools++; return r; }));
+        const n = safe.length;
+        const st = Date.now();
+        const spinChars = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏';
+        const parAnimIv = setInterval(() => {
+          const el = ((Date.now() - st) / 1000).toFixed(1);
+          const si = Math.floor(((Date.now() - st) / 1000 * 8)) % 8;
+          Oflush();
+          try { process.stdout.write(`\r${' '.repeat(cols)}\r ${A.c}${spinChars[si]}${A.R} ${G(`${n} tools running`)}  ${A.d}${el}s${A.R}     `); } catch {}
+        }, 80);
+        const results = await Promise.allSettled(safe.map(async tc => { const r = await execTool(tc, tools, opts, currentAbortController!.signal, undefined, true); doneTools++; return r; }));
+        clearInterval(parAnimIv);
+        Oflush();
         for (const r of results) {
           if (r.status === 'fulfilled') { history.push(r.value); ttc++; GS.tc++; }
           else { history.push({ role: 'tool', content: `Error: ${String(r.reason)}`, tool_call_id: 'parallel', name: 'parallel' }); }
@@ -794,6 +806,7 @@ async function execTool(
   tools: Tool[], opts: ReplOptions,
   extSignal?: AbortSignal,
   confirm?: (msg: string) => Promise<boolean>,
+  noSpinner?: boolean,
 ): Promise<Message> {
   const tool = tools.find(t => t.name === tc.name);
   if (!tool) return { role: 'tool', content: `Error: unknown tool ${tc.name}`, tool_call_id: tc.id, name: tc.name };
@@ -817,6 +830,7 @@ async function execTool(
 
   const toolStart = Date.now();
   const spinner = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏';
+  let execAnimIv: ReturnType<typeof setInterval> | null = null;
 
   const fp = (tc.args.file_path || tc.args.path || tc.args.file || '') as string;
   const meta: string[] = [];
@@ -830,14 +844,16 @@ async function execTool(
   }
   const label = meta.length ? `${tc.name}  ${A.d}${meta.join(' · ')}${A.R}` : tc.name;
 
-  const animTick = () => {
-    const el = (Date.now() - toolStart) / 1000;
-    const si = Math.floor(el * 8) % 8;
-    Oflush();
-    process.stdout.write(`\r${' '.repeat(cols)}\r ${A.c}${spinner[si]}${A.R} ${G(label)}  ${A.d}${el.toFixed(1)}s${A.R}     `);
-  };
-  animTick();
-  const execAnimIv = setInterval(animTick, 100);
+  if (!noSpinner) {
+    const animTick = () => {
+      const el = (Date.now() - toolStart) / 1000;
+      const si = Math.floor(el * 8) % 8;
+      Oflush();
+      try { process.stdout.write(`\r${' '.repeat(cols)}\r ${A.c}${spinner[si]}${A.R} ${G(label)}  ${A.d}${el.toFixed(1)}s${A.R}     `); } catch {}
+    };
+    animTick();
+    execAnimIv = setInterval(animTick, 80);
+  }
 
   try {
     if (tc.name === 'write_file' || tc.name === 'edit_file') {
