@@ -656,6 +656,9 @@ async function runLoop(
       if (thinkAnimIv) { clearInterval(thinkAnimIv); thinkAnimIv = null; }
     };
 
+    let tcSpinIv: ReturnType<typeof setInterval> | null = null;
+    const stopTcSpin = () => { if (tcSpinIv) { clearInterval(tcSpinIv); tcSpinIv = null; } };
+
     currentAbortController = new AbortController();
 
     try {
@@ -669,7 +672,8 @@ async function runLoop(
           if (fc.length > 100_000) fc = fc.slice(-80_000);
           if (fc === t) {
             if (showingThink) { showingThink = false; stopStreamAnim(); }
-            Oflush(); O('\r' + ' '.repeat(cols) + '\r');
+            if (tcSpinIv) { stopTcSpin(); Oflush(); O('\r' + ' '.repeat(cols) + '\r'); }
+            else { Oflush(); O('\r' + ' '.repeat(cols) + '\r'); }
             if (fc.length === t.length) O(b(c('●')) + ' ');
           }
           const rendered = md.feed(t);
@@ -687,11 +691,21 @@ async function runLoop(
           const tc = (chunk as any).tool_call;
           if (tc) {
             curTc = { id: tc.id, name: tc.name, argsStr: '' };
+            const spin = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏';
+            let si = 0;
+            const tStart = Date.now();
+            stopTcSpin();
             Oflush(); O('\r' + ' '.repeat(cols) + '\r');
-            O(g('→') + ' ' + G(tc.name) + '\n');
+            tcSpinIv = setInterval(() => {
+              const el = (Date.now() - tStart) / 1000;
+              si = (si + 1) % 8;
+              Oflush();
+              try { process.stdout.write(`\r ${A.c}${spin[si]}${A.R} ${G(tc.name)}  ${A.d}${el.toFixed(1)}s${A.R}     `); } catch {}
+            }, 80);
           }
         }
         if (chunk.type === 'tool_call_end' && curTc) {
+          stopTcSpin();
           const tcData = (chunk as any).tool_call;
           try {
             const args = tcData?.arguments || JSON.parse(curTc.argsStr || '{}');
@@ -704,6 +718,7 @@ async function runLoop(
       }
     } catch (e: unknown) {
       stopStreamAnim();
+      stopTcSpin();
       const errMsg = e instanceof Error ? e.message : String(e);
       if (errMsg.includes('abort') || errMsg.includes('cancel')) {
         O(y('\n  ⚡ 已取消\n\n'));
@@ -714,6 +729,7 @@ async function runLoop(
 
     currentAbortController = null;
     stopStreamAnim();
+    stopTcSpin();
     Oflush();
     const remaining = md.flush();
     if (remaining) O(remaining);

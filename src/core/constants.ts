@@ -2,7 +2,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import process from 'node:process';
 
-export const DEEPER_VERSION = '1.3.24';
+export const DEEPER_VERSION = '1.3.25';
 export const DEEPER_NAME = 'DeeperCode';
 export const DEEPER_HOME = join(process.env.DEEPER_HOME || join(homedir(), '.deeper'));
 export const DEEPER_CONFIG_FILE = join(DEEPER_HOME, 'config.json');
