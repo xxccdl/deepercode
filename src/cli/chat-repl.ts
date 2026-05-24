@@ -252,7 +252,7 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
   const onSigint = () => {
     if (currentAbortController) {
       currentAbortController.abort();
-      O(y('\n  ⚡ 已中断当前请求\n'));
+      O(y('\n  ⚡ 已取消\n'));
       return;
     }
     if (resolveLine) { const cb = resolveLine; resolveLine = null; cb('/quit'); return; }
@@ -688,8 +688,6 @@ async function runLoop(
           const tc = (chunk as any).tool_call;
           if (tc) {
             curTc = { id: tc.id, name: tc.name, argsStr: '' };
-            Oflush(); O('\r' + ' '.repeat(cols) + '\r');
-            O(G(tc.name) + ' ');
           }
         }
         if (chunk.type === 'tool_call_end' && curTc) {
@@ -707,11 +705,10 @@ async function runLoop(
       stopStreamAnim();
       const errMsg = e instanceof Error ? e.message : String(e);
       if (errMsg.includes('abort') || errMsg.includes('cancel')) {
-        se = null;
-        O(y('\n  ⚡ 请求已取消\n'));
-      } else {
-        se = errMsg;
+        O(y('\n  ⚡ 已取消\n\n'));
+        return;
       }
+      se = errMsg;
     }
 
     currentAbortController = null;
@@ -760,9 +757,13 @@ async function runLoop(
         doneTools++;
       }
       } catch {
-        O(y('\n  ⚡ 已中断工具执行\n'));
+        O(y('\n  ⚡ 已取消\n\n'));
       }
       tcs.length = 0; safe.length = 0; rest.length = 0;
+      if (currentAbortController!.signal.aborted) {
+        currentAbortController = null;
+        return;
+      }
       currentAbortController = null;
 
       trimHistory(history, MAX_HISTORY); continue;
@@ -819,9 +820,16 @@ async function execTool(
   const write = (s: string) => { try { process.stdout.write(s); } catch {} };
 
   const fp = (tc.args.file_path || tc.args.path || tc.args.file || '') as string;
-  const label = (tc.name === 'write_file' || tc.name === 'edit_file') && fp
-    ? `${tc.name} → ${fp.split(/[/\\]/).filter(Boolean).slice(-2).join('/')}`
-    : tc.name;
+  const meta: string[] = [];
+  if (tc.name === 'write_file' || tc.name === 'edit_file') {
+    if (fp) meta.push(fp.split(/[/\\]/).filter(Boolean).slice(-2).join('/'));
+    const content = String(tc.args.content || '');
+    if (content) meta.push(`${(content.length / 1024).toFixed(1)}KB`);
+  } else if (tc.name === 'web_search' || tc.name === 'web_fetch' || tc.name === 'read_file') {
+    const q = String(tc.args.query || tc.args.url || tc.args.file_path || '');
+    if (q) meta.push(q.slice(0, 40));
+  }
+  const label = meta.length ? `${tc.name}  ${A.d}${meta.join(' · ')}${A.R}` : tc.name;
 
   write(`\r${' '.repeat(cols)}\r ${spinner[0]} ${G(label)}     `);
   const execAnimIv = setInterval(() => {
