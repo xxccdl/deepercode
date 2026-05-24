@@ -263,9 +263,22 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
     xmemory.save().then(() => { O('\n' + y('再见！') + '\n'); running = false; rl.close(); process.exit(0); });
   };
   rl.on('SIGINT', onSigint);
-  const onUCE = (err: Error) => { if (!err.message?.includes('readline') && !err.message?.includes('abort')) O(r(`\n  ⚠ ${err.message}`) + '\n'); };
+  const onUCE = (err: Error) => {
+    try {
+      const msg = err.message || String(err);
+      if (msg.includes('readline') || msg.includes('abort')) return;
+      O(r(`\n  ⚠ 内部错误: ${msg.slice(0, 200)}`) + '\n');
+      O(y('  错误已捕获，继续运行\n\n'));
+    } catch { /* 防止 handler 自身崩溃 */ }
+  };
   process.on('uncaughtException', onUCE);
-  const onUHR = (reason: unknown) => { const m = reason instanceof Error ? reason.message : String(reason); if (!m.includes('readline') && !m.includes('Abort') && !m.includes('timeout')) O(r(`\n  ⚠ ${m}`) + '\n'); };
+  const onUHR = (reason: unknown) => {
+    try {
+      const m = reason instanceof Error ? reason.message : String(reason);
+      if (m.includes('readline') || m.includes('Abort') || m.includes('timeout')) return;
+      O(r(`\n  ⚠ 异步错误: ${m.slice(0, 200)}`) + '\n');
+    } catch { /* 防止 handler 自身崩溃 */ }
+  };
   process.on('unhandledRejection', onUHR);
 
   while (running) {
@@ -625,8 +638,8 @@ async function runLoop(
     }
 
     if (stagnation >= 5) {
-      O(y(`\n  连续${stagnation}轮无进展，任务交还\n\n`));
-      return;
+      O(y(`\n  已连续${stagnation}轮无进展，继续尝试...\n`));
+      stagnation = 0;
     }
 
     const msgs = buildMsgs(history);
@@ -737,8 +750,7 @@ async function runLoop(
 
     if (se) {
       ce++; O(r(`\n  ✗ ${se}`));
-      if (ce >= 3) { O(r('\n  连续失败，放弃\n\n')); return; }
-      const w = Math.min(1000 * ce, 5000); O(G(`  重试(${ce}/3)...\n`)); await new Promise(r2 => setTimeout(r2, w)); continue;
+      const w = Math.min(1000 * Math.min(ce, 10), 10000); O(G(`  重试(${ce}/∞)...\n`)); await new Promise(r2 => setTimeout(r2, w)); continue;
     }
 
     const el = Date.now() - st;
@@ -771,7 +783,8 @@ async function runLoop(
           Oflush();
           try { process.stdout.write(`\r${' '.repeat(cols)}\r ${A.c}${spinChars[si]}${A.R} ${G(`${n} tools running`)}  ${A.d}${el}s${A.R}     `); } catch {}
         }, 80);
-        const results = await Promise.allSettled(safe.map(async tc => { const r = await execTool(tc, tools, opts, currentAbortController!.signal, undefined, true); doneTools++; return r; }));
+        const sig = currentAbortController!.signal;
+        const results = await Promise.allSettled(safe.map(async tc => { try { const r = await execTool(tc, tools, opts, sig, undefined, true); doneTools++; return r; } catch (e) { return { role: 'tool', content: `Error: ${e instanceof Error ? e.message : String(e)}`, tool_call_id: tc.id, name: tc.name } as Message; } }));
         clearInterval(parAnimIv);
         Oflush();
         for (const r of results) {
@@ -780,15 +793,19 @@ async function runLoop(
         }
       }
       for (const tc of rest) {
-        const r2 = await execTool(tc, tools, opts, currentAbortController!.signal, confirm);
-        history.push(r2); if (!r2.content?.startsWith('Error:') && !r2.content?.includes('skipped')) { ttc++; GS.tc++; }
-        doneTools++;
+        try {
+          const r2 = await execTool(tc, tools, opts, currentAbortController?.signal, confirm);
+          history.push(r2); if (!r2.content?.startsWith('Error:') && !r2.content?.includes('skipped')) { ttc++; GS.tc++; }
+          doneTools++;
+        } catch {
+          history.push({ role: 'tool', content: 'Error: tool execution failed', tool_call_id: tc.id, name: tc.name });
+        }
       }
       } catch {
         O(y('\n  ⚡ 已取消\n\n'));
       }
       tcs.length = 0; safe.length = 0; rest.length = 0;
-      if (currentAbortController!.signal.aborted) {
+      if (currentAbortController?.signal.aborted) {
         currentAbortController = null;
         return;
       }

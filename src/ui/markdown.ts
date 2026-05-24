@@ -152,12 +152,8 @@ export class MarkdownStreamRenderer {
     }
 
     // Data rows
-    const maxRows = 12;
-    for (let r = 1; r < allRows.length && r <= maxRows; r++) {
+    for (let r = 1; r < allRows.length; r++) {
       out += `  ${F} ` + allRows[r].map((c, i) => this.padCell(c, colWidths[i] || 3, aligns[i] || 'L', false)).join(` ${F} `) + ` ${F}\n`;
-    }
-    if (allRows.length > maxRows + 1) {
-      out += ansi(A.d + '\x1b[90m', `  ${F} ${ansi(A.d, '...')} `.padEnd(colWidths.reduce((a, w) => a + w + 3, 3))) + ` ${F}` + '\n';
     }
 
     // Bottom border
