@@ -252,7 +252,6 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
   const onSigint = () => {
     if (currentAbortController) {
       currentAbortController.abort();
-      currentAbortController = null;
       O(y('\n  ⚡ 已中断当前请求\n'));
       return;
     }

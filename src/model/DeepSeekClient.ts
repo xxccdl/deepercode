@@ -32,10 +32,10 @@ function reorderMsgFields(msg: Record<string, unknown>, name: string): Record<st
 
 const isRetryable = (error: Error): boolean => {
   const msg = error.message.toLowerCase();
+  if (msg.includes('abort')) return false;
   if (msg.includes('429') || msg.includes('rate limit')) return true;
   if (msg.includes('500') || msg.includes('502') || msg.includes('503') || msg.includes('504')) return true;
-  if (msg.includes('timeout') || msg.includes('abort')) return true;
-  if (msg.includes('econnreset') || msg.includes('econnrefused')) return true;
+  if (msg.includes('timeout') || msg.includes('econnreset') || msg.includes('econnrefused')) return true;
   return false;
 };
 
