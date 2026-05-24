@@ -182,14 +182,17 @@ export class DeepSeekClient {
     }
 
     if (tools && tools.length > 0) {
-      body.tools = tools.map((tool) => ({
-        type: 'function',
-        function: {
-          name: tool.name,
-          description: tool.description,
-          parameters: tool.parameters,
-        },
-      }));
+      body.tools = tools.map((tool) => {
+        const safeName = tool.name.replace(/[^a-zA-Z0-9_-]/g, '_').replace(/_{2,}/g, '_').replace(/^_|_$/g, '') || 'tool';
+        return {
+          type: 'function',
+          function: {
+            name: safeName,
+            description: tool.description,
+            parameters: tool.parameters,
+          },
+        };
+      });
       body.tool_choice = 'auto';
     }
 

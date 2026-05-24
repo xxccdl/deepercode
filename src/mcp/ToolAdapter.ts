@@ -10,7 +10,8 @@ export class ToolAdapter {
   }
 
   adapt(mcpTool: MCPTool, serverName: string): Tool {
-    const adaptedName = `mcp:${serverName}:${mcpTool.name}`;
+    const rawName = `mcp:${serverName}:${mcpTool.name}`;
+    const adaptedName = rawName.replace(/[^a-zA-Z0-9_-]/g, '_').replace(/_{2,}/g, '_');
 
     const tool: Tool = {
       name: adaptedName,
