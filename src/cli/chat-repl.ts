@@ -356,6 +356,7 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
         O(G('  /export') + G('    导出对话') + '\n');
         O(G('  /delete [n]') + G(' 删除会话') + '\n');
         O(G('  /init') + G('      初始化项目') + '\n');
+        O(G('  /compact') + G('   压缩上下文') + '\n');
         O('\n'); continue;
       }
       const [cmd, ...rest] = trimmed.split(/\s+/);
@@ -403,7 +404,14 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
         }
         continue;
       }
-      if (cmd === '/init') { await initProject(); continue; }
+      if (cmd === '/init') {
+        const f = join(process.cwd(), 'deeper.md');
+        if (existsSync(f)) { O(y('  deeper.md 已存在\n\n')); continue; }
+        O(g('  正在分析项目并生成 deeper.md...\n'));
+        line = '请全面分析当前项目的目录结构、代码和技术栈,生成一个完整的 deeper.md 项目上下文文件。分析内容包括:项目名称与目标、技术栈详情、目录结构说明、代码规范与命名约定、常用命令、AI应遵守的规则和注意事项。使用 write_file 将完整内容写入 deeper.md。';
+        break;
+      }
+      if (cmd === '/compact') { compressHistory(history); O(g('已压缩上下文') + G(` (保留 ${history.length} 条)`) + '\n\n'); continue; }
       if (cmd === '/status') { O(B(`▸ API:${GS.api} 工具:${GS.tc} 字符:${GS.ch} · 上下文:${history.length}条`) + '\n\n'); continue; }
       if (cmd === '/mcp') {
         if (!mcpClient) { O(y('  MCP 未初始化\n\n')); continue; }
@@ -439,7 +447,7 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
       }
       if (cmd === '/help') {
         O(c('  /help /clear /quit /save [name] /load|resume [name] /sessions\n'));
-        O(c('  /tools [cat] /stats /memory /tasks /model /config /cwd /export /init /mcp /rules\n'));
+        O(c('  /tools [cat] /stats /memory /tasks /model /config /cwd /export /init /compact /mcp /rules\n'));
         O(c('  /plan <任务> /spec <任务> /review <路径> /fix [目标]\n'));
         O(c('  /commit /analyze [路径] /diff <文件> /undo /delete [n] /status\n\n'));
         continue;
@@ -793,8 +801,9 @@ async function runLoop(
       stagnation = 0;
       Oflush();
       currentAbortController = new AbortController();
-      const safe = tcs.filter(t => (TOOL_SAFETY_MAP[t.name] || 'safe') === 'safe');
-      const rest = tcs.filter(t => (TOOL_SAFETY_MAP[t.name] || 'safe') !== 'safe');
+      const safe = tcs.filter(t => (TOOL_SAFETY_MAP[t.name] || 'safe') === 'safe' && t.name !== 'ask_user');
+      const askUsers = tcs.filter(t => t.name === 'ask_user');
+      const rest = tcs.filter(t => (TOOL_SAFETY_MAP[t.name] || 'safe') !== 'safe' && t.name !== 'ask_user');
       try {
       const compactFc = fc && fc.length > 500 ? fc.replace(/\n/g, ' ').slice(0, 300) + '…' : fc;
       history.push({ role: 'assistant', content: compactFc || null, reasoning_content: th || undefined, tool_calls: tcs.map(t => ({ id: t.id, name: t.name, arguments: { ...t.args } })) });
@@ -834,10 +843,16 @@ async function runLoop(
           history.push({ role: 'tool', content: 'Error: tool execution failed', tool_call_id: tc.id, name: tc.name });
         }
       }
+      for (const tc of askUsers) {
+        Oflush();
+        const r2 = await execTool(tc, tools, opts, currentAbortController?.signal, undefined, true);
+        history.push(r2); ttc++; GS.tc++;
+        doneTools++;
+      }
       } catch {
         O(y('\n  ⚡ 已取消\n\n'));
       }
-      tcs.length = 0; safe.length = 0; rest.length = 0;
+      tcs.length = 0; safe.length = 0; askUsers.length = 0; rest.length = 0;
       if (currentAbortController?.signal.aborted) {
         currentAbortController = null;
         return;
@@ -1302,49 +1317,6 @@ async function exportHistory(history: Message[]) {
   const file = join(process.cwd(), `deeper-export-${Date.now()}.json`);
   writeFileSync(file, JSON.stringify(history, null, 2), 'utf-8');
   O(g(`已导出: ${file}`) + '\n\n');
-}
-
-async function initProject(): Promise<void> {
-  const file = join(process.cwd(), 'deeper.md');
-  if (existsSync(file)) {
-    O(y('  deeper.md 已存在，跳过\n\n'));
-    return;
-  }
-  const content = `# DeeperCode 项目上下文
-
-> 此文件由 \`/init\` 自动生成，AI 会在每次对话中自动读取。
-> 你可以手动编辑，添加项目规则、约定和背景信息。
-
-## 📁 项目名称
-
-<!-- 填写项目名称 -->
-
-## 🎯 项目目标
-
-<!-- 简要描述项目目的 -->
-
-## 🛠 技术栈
-
-<!-- 例如: React + TypeScript + Vite -->
-
-## 📐 代码规范
-
-<!-- 命名约定、文件组织等 -->
-
-## ⚙️ 常用命令
-
-<!-- npm run dev, npm test 等 -->
-
-## 📝 注意事项
-
-<!-- AI 需要注意的任何特殊要求 -->
-
----
-
-*最后更新: ${new Date().toISOString()}*
-`;
-  writeFileSync(file, content, 'utf-8');
-  O(g('已创建: deeper.md') + G(' (可编辑后 AI 自动读取)') + '\n\n');
 }
 
 // ========== Display commands ==========
