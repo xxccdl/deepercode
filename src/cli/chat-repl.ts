@@ -125,8 +125,7 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
         { role: 'user', content: task },
       ];
       let ce = 0, stag = 0;
-      const maxIter = 20;
-      for (let iter = 0; iter < maxIter; iter++) {
+      while (true) {
         const msgs = buildMsgs(lh);
         let fc = '', th = '';
         let tcs: Array<{ id: string; name: string; args: Record<string, unknown> }> = [];
@@ -198,11 +197,10 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
           trimHistory(lh, 20); continue;
         }
         if (fc) { lh.push({ role: 'assistant', content: fc, reasoning_content: th || undefined }); stag = 0; }
-        else { stag++; if (stag >= 4) return `[停滞] ${task.slice(0, 60)}`; continue; }
+        else { stag++; if (stag >= 4) { stag = 0; } continue; }
         const final = lh[lh.length - 1]?.content?.slice(0, 800) || '完成';
         return final;
       }
-      return `[超限] 子代理达到最大迭代(${maxIter})`;
     };
 
     if (isBg) {
