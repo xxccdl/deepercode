@@ -384,8 +384,8 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
         O(G('  /tasks') + G('     任务列表') + '\n');
         O(G('  /rules') + G('     规则管理') + '\n');
         O(G('  /mcp') + G('       MCP服务器') + '\n');
-        O(G('  /plan') + G(' <任务> 先出方案') + '\n');
-        O(G('  /spec') + G(' <任务> 先出规格') + '\n');
+        O(G('  /plan') + G(' <任务> 方案设计') + '\n');
+        O(G('  /spec') + G(' <任务> 规格设计') + '\n');
         O(G('  /review') + G(' <路径> 代码审查') + '\n');
         O(G('  /fix') + G(' [目标] 自动修复') + '\n');
         O(G('  /commit') + G('    智能提交') + '\n');
@@ -495,39 +495,54 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
         O(c('  /commit /analyze [路径] /diff <文件> /undo /delete [n] /status\n\n'));
         continue;
       }
-      if (cmd === '/plan') {
-        if (!arg) { O(y('  用法: /plan <任务描述>\n\n')); continue; }
-        O(b(c('  Plan Mode')) + G(` • ${arg.slice(0, 50)}`) + '\n\n');
-        history.push({ role: 'system', content: `[Plan Mode]
-你必须遵循以下流程，严格按步骤执行：
-1. 先输出一份详尽的实施方案（不要写代码）
-2. 方案必须包含：需求分析、技术选型、架构设计、数据流、模块划分、实施步骤
-3. 等待用户确认方案（输入 ok/继续/可以 等确认词）
-4. 用户确认后，按方案逐步实施，每完成一步更新 todo
-5. 完成后总结交付内容
+      if (cmd === '/plan' || cmd === '/spec') {
+        if (!arg) { O(y(`  用法: ${cmd} <任务描述>\n\n`)); continue; }
+        const isSpec = cmd === '/spec';
+        const label = isSpec ? 'Spec' : 'Plan';
+        const outFile = isSpec ? 'spec.md' : 'plan.md';
+        const outPath = join(process.cwd(), outFile);
+        const docType = isSpec
+          ? '产品规格文档（需求概述、功能清单、交互设计、数据结构、API设计、组件树、非功能性需求、测试策略、里程碑）'
+          : '实施方案（需求分析、技术选型、架构设计、数据流、模块划分、实施步骤）';
 
-当前任务：${arg}` });
-        history.push({ role: 'user', content: arg });
-        const pfdefs = toolsToDefs(tools);
-        await runLoop(opts, history, tools, pfdefs, confirm);
-        continue;
-      }
-      if (cmd === '/spec') {
-        if (!arg) { O(y('  用法: /spec <任务描述>\n\n')); continue; }
-        O(b(c('  Spec Mode')) + G(` • ${arg.slice(0, 50)}`) + '\n\n');
-        history.push({ role: 'system', content: `[Spec Mode]
-你必须遵循以下流程，严格按步骤执行：
-1. 先输出一份完整的产品规格文档（不要写代码）
-2. 规格文档必须包含：需求概述、功能清单、交互设计、数据结构、API设计、组件树、非功能性需求、测试策略、里程碑
-3. 文档使用 Markdown 格式，标题用 # 层次清晰
-4. 等待用户确认规格（输入 ok/继续/可以 等确认词）
-5. 用户确认后，按规格逐步实施，每完成一步更新 todo
-6. 完成后总结交付内容
+        O(b(c(`  ${label} Mode`)) + G(` • ${arg.slice(0, 50)}`) + '\n\n');
 
+        const phase1Tools = tools.filter(t =>
+          ['read_file','glob_find','list_dir','file_info','batch_read','grep_search','codebase_search','symbol_search','find_references','find_definition','text_search','regex_find','web_search','web_fetch','write_file','edit_file','ask_user','todo_manager'].includes(t.name)
+        );
+
+        history.push({ role: 'system', content: `[${label} Mode · Phase 1: 方案设计]
+你是资深${isSpec ? '产品架构师' : '技术架构师'}。当前任务是设计${isSpec ? '产品规格' : '技术方案'}。
+
+步骤:
+1. 读取项目现有代码和结构
+2. 用 ask_user 澄清需求和技术决策
+3. 撰写完整${docType}，用 write_file 保存到 \`${outFile}\`
+4. 简要总结方案要点
+
+**不要写业务代码，只做设计。**
 当前任务：${arg}` });
+
         history.push({ role: 'user', content: arg });
-        const sfdefs = toolsToDefs(tools);
-        await runLoop(opts, history, tools, sfdefs, confirm);
+        const p1defs = toolsToDefs(phase1Tools);
+        await runLoop(opts, history, phase1Tools, p1defs, confirm);
+
+        const planExists = existsSync(outPath);
+        if (!planExists) {
+          O(y(`  ${outFile} 未生成，跳过实施\n\n`));
+          continue;
+        }
+
+        try { const c = readFileSync(outPath, 'utf-8'); O(G(`\n  ${outFile}`) + G(` (${c.length}字符)`) + '\n'); } catch {}
+
+        const doImplement = await confirm(`开始按 ${outFile} 实施?`);
+        if (!doImplement) { O(G(' 方案已保存，可稍后继续\n\n')); continue; }
+
+        const planContent = readFileSync(outPath, 'utf-8').slice(0, 6000);
+        history.push({ role: 'system', content: `[${label} Mode · Phase 2: 实施]\n严格按 \`${outFile}\` 方案实施。每完成一步更新 todo_manager。遇问题用 ask_user 确认。\n\n[方案内容]\n${planContent}` });
+
+        const p2defs = toolsToDefs(tools);
+        await runLoop(opts, history, tools, p2defs, confirm);
         continue;
       }
       if (cmd === '/review') {
