@@ -451,8 +451,10 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
         const f = join(process.cwd(), 'deeper.md');
         if (existsSync(f)) { O(y('  deeper.md 已存在\n\n')); continue; }
         O(g('  正在分析项目并生成 deeper.md...\n'));
-        line = '请全面分析当前项目的目录结构、代码和技术栈,生成一个完整的 deeper.md 项目上下文文件。分析内容包括:项目名称与目标、技术栈详情、目录结构说明、代码规范与命名约定、常用命令、AI应遵守的规则和注意事项。使用 write_file 将完整内容写入 deeper.md。';
-        break;
+        history.push({ role: 'user', content: '请全面分析当前项目的目录结构、代码和技术栈,生成一个完整的 deeper.md 项目上下文文件。分析内容包括:项目名称与目标、技术栈详情、目录结构说明、代码规范与命名约定、常用命令、AI应遵守的规则和注意事项。使用 write_file 将完整内容写入 deeper.md。' });
+        const idefs = toolsToDefs(tools);
+        await runLoop(opts, history, tools, idefs, confirm);
+        continue;
       }
       if (cmd === '/compact') { compressHistory(history); O(g('已压缩上下文') + G(` (保留 ${history.length} 条)`) + '\n\n'); continue; }
       if (cmd === '/status') { O(B(`▸ API:${GS.api} 工具:${GS.tc} 字符:${GS.ch} · 上下文:${history.length}条`) + '\n\n'); continue; }
