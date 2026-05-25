@@ -92,53 +92,97 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
   const toolDefs = toolsToDefs(tools);
 
   const { setSubagentRunner, setAskUserFn } = await import('../tools/builtin/index.js');
+
+  const SUBAGENT_TOOL_NAMES = new Set([
+    'read_file', 'glob_find', 'list_dir', 'file_info', 'batch_read',
+    'grep_search', 'codebase_search', 'symbol_search', 'find_references', 'find_definition', 'text_search', 'regex_find',
+    'web_search', 'web_fetch', 'http_request',
+    'run_command', 'run_async',
+    'npm_manage', 'run_test', 'build_project',
+    'todo_manager', 'ask_user',
+    'write_file', 'edit_file',
+  ]);
+  const saTools = tools.filter(t => SUBAGENT_TOOL_NAMES.has(t.name));
+  const saToolDefs = toolsToDefs(saTools);
+
   setSubagentRunner(async (task: string, mode: 'foreground' | 'background') => {
     const isBg = mode === 'background';
     const run = async () => {
+      const mainTask = history.filter(m => m.role === 'user').pop()?.content?.slice(0, 200) || '';
+      const deeperCtx = cachedRead(join(process.cwd(), 'deeper.md'), 2000);
+      const projRules = cachedRead(join(process.cwd(), '.deeper', 'rules.md'), 1000);
+      const globalRules = cachedRead(join(DEEPER_HOME, 'rules.md'), 500);
+
+      let sysCtx = `DeeperCode V4-Pro 子代理。独立完成任务并输出简洁结论。cwd=${process.cwd()}\n`;
+      sysCtx += `主任务: ${mainTask || '无'}\n`;
+      if (deeperCtx) sysCtx += `[deeper.md]\n${deeperCtx}\n`;
+      if (projRules) sysCtx += `[项目规则]\n${projRules}\n`;
+      if (globalRules) sysCtx += `[全局规则]\n${globalRules}\n`;
+      sysCtx += `规则: 用工具完成任务 → 输出摘要(≤500字)。不猜测，不确定就问 ask_user。危险工具不可用。`;
+
       const lh: Message[] = [
-        { role: 'system', content: `DeeperCode 子代理。用工具完成任务，完成输出摘要。cwd=${process.cwd()}` },
+        { role: 'system', content: sysCtx },
         { role: 'user', content: task },
       ];
-      const tds = toolsToDefs(tools);
       let ce = 0, stag = 0;
-      while (true) {
+      const maxIter = 20;
+      for (let iter = 0; iter < maxIter; iter++) {
         const msgs = buildMsgs(lh);
         let fc = '', th = '';
         let tcs: Array<{ id: string; name: string; args: Record<string, unknown> }> = [];
         let curTc: { id: string; name: string; argsStr: string } | null = null;
         let se: string | null = null;
         try {
-          const stream = await callApi(opts, msgs, tds, 131072); GS.api++; ce = 0;
+          const stream = await callApi(opts, msgs, saToolDefs, 65536); GS.api++; ce = 0;
           for await (const chunk of stream) {
-            if (chunk.type === 'text') { fc += chunk.content || ''; }
-            if (chunk.type === 'thinking') th += chunk.content || '';
+            if (chunk.type === 'text') { fc += chunk.content || ''; if (fc.length > 50000) fc = fc.slice(-40000); }
+            if (chunk.type === 'thinking') { th += chunk.content || ''; if (th.length > 10000) th = th.slice(-8000); }
             if (chunk.type === 'tool_call_start') {
               const tc = (chunk as any).tool_call;
               if (tc) curTc = { id: tc.id, name: tc.name, argsStr: '' };
             }
             if (chunk.type === 'tool_call_end' && curTc) {
               const tcData = (chunk as any).tool_call;
-              try {
-                const args = tcData?.arguments || JSON.parse(curTc.argsStr || '{}');
-                tcs.push({ id: curTc.id, name: curTc.name, args });
-              } catch { tcs.push({ id: curTc.id, name: curTc.name, args: {} }); }
+              try { const args = tcData?.arguments || JSON.parse(curTc.argsStr || '{}'); tcs.push({ id: curTc.id, name: curTc.name, args }); } catch { tcs.push({ id: curTc.id, name: curTc.name, args: {} }); }
               curTc = null;
             }
             if (chunk.type === 'done') break;
             if (chunk.type === 'error') { se = chunk.error || '?'; break; }
           }
-        } catch (e: unknown) { se = e instanceof Error ? e.message : String(e); }
+        } catch (e: unknown) { const em = e instanceof Error ? e.message : String(e); if (em.includes('abort') || em.includes('cancel')) { return `[已取消] ${task.slice(0, 60)}`; } se = em; }
 
-        if (se) { ce++; stag++; if (ce >= 2) return `子代理失败: ${se}`; await new Promise(r2 => setTimeout(r2, 1000)); continue; }
+        if (se) { ce++; stag++; const w = Math.min(800 * Math.min(ce, 10), 8000); await new Promise(r2 => setTimeout(r2, w)); continue; }
 
         if (tcs.length > 0) {
           stag = 0;
           lh.push({ role: 'assistant', content: fc || null, reasoning_content: th || undefined, tool_calls: tcs.map(t => ({ id: t.id, name: t.name, arguments: { ...t.args } })) });
-          for (const tc of tcs) {
-            const tool = tools.find(t => t.name === tc.name);
+          fc = ''; th = '';
+
+          const safe = tcs.filter(t => (TOOL_SAFETY_MAP[t.name] || 'safe') === 'safe' && t.name !== 'ask_user');
+          const askUsers = tcs.filter(t => t.name === 'ask_user');
+          const dangerous = tcs.filter(t => (TOOL_SAFETY_MAP[t.name] || 'safe') !== 'safe' && t.name !== 'ask_user');
+
+          if (safe.length >= 1) {
+            const results = await Promise.allSettled(safe.map(async tc => {
+              const tool = saTools.find(t => t.name === tc.name);
+              if (!tool) return { role: 'tool', content: `Error: unknown ${tc.name}`, tool_call_id: tc.id, name: tc.name } as Message;
+              try {
+                const ac = new AbortController();
+                const timeout = TOOL_TIMEOUT_MAP[tc.name] || DEFAULT_TOOL_TIMEOUT;
+                const timer = setTimeout(() => ac.abort(), timeout);
+                const r = await tool.execute(tc.args, ac.signal);
+                clearTimeout(timer);
+                const txt = sanitize(r.output || '').slice(0, TOOL_RESULT_MAX);
+                GS.tc++;
+                return { role: 'tool', content: r.success ? txt : `Error: ${(r as any).error || 'failed'}`, tool_call_id: tc.id, name: tc.name } as Message;
+              } catch (e: unknown) { return { role: 'tool', content: `Error: ${e instanceof Error ? e.message : String(e)}`, tool_call_id: tc.id, name: tc.name } as Message; }
+            }));
+            for (const r of results) { if (r.status === 'fulfilled') lh.push(r.value); else lh.push({ role: 'tool', content: `Error: ${String(r.reason)}`, tool_call_id: 'parallel', name: 'parallel' }); }
+          }
+          for (const tc of [...dangerous, ...askUsers]) {
+            const tool = saTools.find(t => t.name === tc.name);
             if (!tool) { lh.push({ role: 'tool', content: `Error: unknown ${tc.name}`, tool_call_id: tc.id, name: tc.name }); continue; }
-            const s2 = TOOL_SAFETY_MAP[tc.name] || 'safe';
-            if (s2 === 'dangerous') { lh.push({ role: 'tool', content: 'Skipped', tool_call_id: tc.id, name: tc.name }); continue; }
+            if (tc.name !== 'ask_user' && (TOOL_SAFETY_MAP[tc.name] || 'safe') === 'dangerous') { lh.push({ role: 'tool', content: 'Skipped (子代理不允许危险操作)', tool_call_id: tc.id, name: tc.name }); continue; }
             try {
               const ac = new AbortController();
               const timeout = TOOL_TIMEOUT_MAP[tc.name] || DEFAULT_TOOL_TIMEOUT;
@@ -146,17 +190,19 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
               const r = await tool.execute(tc.args, ac.signal);
               clearTimeout(timer);
               const txt = sanitize(r.output || '').slice(0, TOOL_RESULT_MAX);
-              lh.push({ role: 'tool', content: r.success ? txt : `Error: ${(r as any).error}`, tool_call_id: tc.id, name: tc.name });
+              lh.push({ role: 'tool', content: r.success ? txt : `Error: ${(r as any).error || 'failed'}`, tool_call_id: tc.id, name: tc.name });
               GS.tc++;
             } catch (e: unknown) { lh.push({ role: 'tool', content: `Error: ${e instanceof Error ? e.message : String(e)}`, tool_call_id: tc.id, name: tc.name }); }
           }
+          tcs.length = 0; safe.length = 0; askUsers.length = 0; dangerous.length = 0;
           trimHistory(lh, 20); continue;
         }
         if (fc) { lh.push({ role: 'assistant', content: fc, reasoning_content: th || undefined }); stag = 0; }
-        else { stag++; if (stag >= 3) return `停滞: 连续${stag}轮无进展`; continue; }
-        const final = lh[lh.length - 1]?.content || '完成';
-        return final.slice(0, 800);
+        else { stag++; if (stag >= 4) return `[停滞] ${task.slice(0, 60)}`; continue; }
+        const final = lh[lh.length - 1]?.content?.slice(0, 800) || '完成';
+        return final;
       }
+      return `[超限] 子代理达到最大迭代(${maxIter})`;
     };
 
     if (isBg) {
@@ -164,11 +210,10 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
         history.push({ role: 'system', content: `[子代理] ${task.slice(0, 50)} → ${result.slice(0, 300)}` });
       });
       return `后台子代理已启动: ${task.slice(0, 80)}`;
-    } else {
-      O(G(`  🟊 subagent  ${task.slice(0, 60)}...\n`));
-      const result = await run();
-      return result;
     }
+    O(G(`  🟊 subagent  ${task.slice(0, 60)}...\n`));
+    const result = await run();
+    return result;
   });
 
   const history: Message[] = [];

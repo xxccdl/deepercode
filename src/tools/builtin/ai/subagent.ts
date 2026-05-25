@@ -8,7 +8,7 @@ export function setSubagentRunner(fn: (task: string, mode: 'foreground' | 'backg
 
 export const subagent: Tool = {
   name: 'subagent',
-  description: '启动子代理处理任务。默认前台模式等待完成返回结果，mode=background 后台执行不阻塞。用于: 代码分析、文件搜索、并行构建、测试运行等。',
+  description: '启动子代理处理独立任务。可用工具: read/write/edit 文件、glob_find 搜索、codebase_search、web_search/fetch、grep_search、run_command、npm_manage、todo_manager、ask_user 等约20个。默认前台等待结果，mode=background 后台执行不阻塞主代理。适用: 代码分析、文件搜索、批量读取、项目检查等可独立完成的任务。',
   category: 'ai',
   parameters: {
     type: 'object',
