@@ -223,12 +223,14 @@ export class MarkdownStreamRenderer {
   private flushCodeBlock(): string {
     const lines = this.codeContent.split('\n').filter(l => l || true);
     let out = '';
-    const max = Math.min(lines.length, 20);
+    const max = Math.min(lines.length, 30);
     for (let i = 0; i < max; i++) {
-      out += `  ${ansi(A.d + '\x1b[90m', String(i + 1).padStart(3, ' '))} ${ansi(A.d, '│')} ${lines[i]}\n`;
+      const lineNum = ansi(A.d + '\x1b[90m', String(i + 1).padStart(3, ' '));
+      const separator = ansi(A.d, '│');
+      out += `  ${lineNum} ${separator} ${lines[i]}\n`;
     }
-    if (lines.length > 20) out += ansi(A.d + '\x1b[90m', `  ... (${lines.length - 20} lines omitted)\n`);
-    if (this.codeDropped > 0) out += ansi(A.d + '\x1b[90m', `  ... (${this.codeDropped} lines dropped, code too large)\n`);
+    if (lines.length > 30) out += ansi(A.d + '\x1b[90m', `  ... (${lines.length - 30} 行省略)\n`);
+    if (this.codeDropped > 0) out += ansi(A.d + '\x1b[90m', `  ... (${this.codeDropped} 行丢弃，代码过大)\n`);
     out += ansi(A.d, `  └ ${this.codeLang || 'code'}`);
     this.codeContent = '';
     this.codeDropped = 0;
@@ -242,11 +244,11 @@ export class MarkdownStreamRenderer {
     if (t === '') return '';
 
     let m: RegExpMatchArray | null;
-    if ((m = line.match(/^#{4}\s+(.+)/))) return ansi(A.b + '\x1b[36m', `  ## ${m[1]}`);
+    if ((m = line.match(/^#{4}\s+(.+)/))) return ansi(A.b + '\x1b[36m', `  ◦ ${m[1]}`);
     if ((m = line.match(/^#{3}\s+(.+)/))) return ansi(A.b + '\x1b[33m', `  ▸ ${m[1]}`);
-    if ((m = line.match(/^#{2}\s+(.+)/))) return ansi(A.b + '\x1b[34m', `  ▸▸ ${m[1]}`);
-    if ((m = line.match(/^#\s+(.+)/))) return ansi(A.b + '\x1b[35m', ` █ ${m[1]}`);
-    if (line.startsWith('> ')) return ansi(A.d + '\x1b[90m', `  │ ${line.slice(2)}`);
+    if ((m = line.match(/^#{2}\s+(.+)/))) return '\n' + ansi(A.b + '\x1b[34m', `  ▸▸ ${m[1]}`) + '\n' + ansi(A.d + '\x1b[90m', '  ──────────────────────');
+    if ((m = line.match(/^#\s+(.+)/))) return '\n' + ansi(A.b + '\x1b[35m', ` █ ${m[1]}`) + '\n' + ansi(A.d + '\x1b[90m', '  ══════════════════════');
+    if (line.startsWith('> ')) return ansi(A.d + '\x1b[90m', `  ┃ `) + ansi(A.d + '\x1b[37m', line.slice(2));
     if (/^[-*_]{3,}\s*$/.test(t) && !t.includes('|')) return ansi(A.d + '\x1b[90m', '  ──'.repeat(12));
     if ((m = line.match(/^(\s*)(\d+)\.\s+(.+)/))) { const sp = m[1].length; return ' '.repeat(Math.max(0, sp)) + ansi(A.b + '\x1b[36m', `${m[2]}.`) + ' ' + this.inline(m[3]); }
     if ((m = line.match(/^(\s*)[*+-]\s+(.+)/))) { const sp = m[1].length; return ' '.repeat(Math.max(0, sp)) + ansi(A.g, '• ') + this.inline(m[2]); }

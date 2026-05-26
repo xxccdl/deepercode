@@ -61,7 +61,7 @@ export function estimateTokens(text: string): number {
     const digits = (line.match(/\d+/g) || []).join('').length;
     const words = line.match(/[a-zA-Z_]+/g) || [];
 
-    const wordTokens = words.reduce((s, w) => {
+    const wordTokens = (words as string[]).reduce((s: number, w: string) => {
       if (w.length <= 4) return s + 1;
       return s + Math.ceil(w.length / 3.5);
     }, 0);

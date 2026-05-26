@@ -56,6 +56,24 @@ const TOOL_TIMEOUT_MAP: Record<string, number> = {
 };
 const DEFAULT_TOOL_TIMEOUT = 30_000;
 
+const TOOL_ICONS: Record<string, string> = {
+  read_file: '📖', write_file: '📝', edit_file: '✏️', delete_file: '🗑️',
+  glob_find: '🔍', grep_search: '🔎', codebase_search: '🔎', symbol_search: '🔖',
+  find_references: '🔗', find_definition: '📍', text_search: '🔍', regex_find: '🔍',
+  web_search: '🌐', web_fetch: '🌐', http_request: '🌐',
+  run_command: '⚡', run_async: '⚡', pipe_commands: '⚡', shell_script: '⚡',
+  build_project: '🔨', run_test: '🧪', npm_manage: '📦',
+  todo_manager: '📋', ask_user: '❓', subagent: '🤖',
+  batch_read: '📚', list_dir: '📁', file_info: 'ℹ️',
+  copy_file: '📋', move_file: '📦', create_dir: '📁',
+  diff_files: '📊', watch_file: '👁️',
+  db_schema: '🗄️', sql_query: '🗃️', sql_migrate: '🗃️',
+  docker_manage: '🐳', env_manage: '🔧', config_manage: '⚙️',
+  format_code: '🎨', lint_code: '🔍', type_check: '✅',
+  secret_scan: '🔒', vulnerability_check: '🛡️',
+  screenshot_page: '📸', browser_action: '🖥️',
+};
+
 let GS = { tc: 0, api: 0, ch: 0 };
 let skillEngine: SkillEngine | null = null;
 let mcpClient: MCPClient | null = null;
@@ -450,14 +468,36 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
       if (cmd === '/init') {
         const f = join(process.cwd(), 'deeper.md');
         if (existsSync(f)) { O(y('  deeper.md 已存在\n\n')); continue; }
-        O(g('  正在分析项目并生成 deeper.md...\n'));
+        O('\n' + A.d + '\x1b[90m' + '  ┌──────────────────────────────────────────┐' + A.R + '\n');
+        O(A.d + '\x1b[90m' + '  │' + A.R + b(c(' Init Mode')) + A.d + '\x1b[90m' + '  项目初始化' + A.R + A.d + '\x1b[90m' + '                │' + A.R + '\n');
+        O(A.d + '\x1b[90m' + '  └──────────────────────────────────────────┘' + A.R + '\n');
+        O(G('  🚀 正在分析项目并生成 deeper.md...') + '\n\n');
         history.push({ role: 'user', content: '请全面分析当前项目的目录结构、代码和技术栈,生成一个完整的 deeper.md 项目上下文文件。分析内容包括:项目名称与目标、技术栈详情、目录结构说明、代码规范与命名约定、常用命令、AI应遵守的规则和注意事项。使用 write_file 将完整内容写入 deeper.md。' });
         const idefs = toolsToDefs(tools);
         await runLoop(opts, history, tools, idefs, confirm);
         continue;
       }
-      if (cmd === '/compact') { compressHistory(history); O(g('已压缩上下文') + G(` (保留 ${history.length} 条)`) + '\n\n'); continue; }
-      if (cmd === '/status') { O(B(`▸ API:${GS.api} 工具:${GS.tc} 字符:${GS.ch} · 上下文:${history.length}条`) + '\n\n'); continue; }
+      if (cmd === '/compact') { compressHistory(history); O(g('  ✓ 已压缩上下文') + G(` (保留 ${history.length} 条)`) + '\n\n'); continue; }
+      if (cmd === '/status') {
+        const msgs = buildMsgs(history);
+        const ctxTokens = estimateMessageTokens(msgs, toolDefs.map(t => ({ type: 'function', function: { name: t.function.name, description: t.function.description, parameters: t.function.parameters } })));
+        const ctxPct = ((ctxTokens / CONTEXT_LIMIT) * 100).toFixed(1);
+        const pct = ctxTokens / CONTEXT_LIMIT;
+        const width = 16;
+        const filled = Math.round(pct * width);
+        const bar = '█'.repeat(Math.min(filled, width)) + '░'.repeat(Math.max(width - filled, 0));
+        const barColor = pct > 0.85 ? y(bar) : pct > 0.6 ? A.m + bar + A.R : G(bar);
+        O(b(c('  Status')) + '\n');
+        O(G(`  API: ${GS.api} · 工具: ${GS.tc} · 字符: ${GS.ch}`) + '\n');
+        O(G(`  上下文: `) + barColor + G(` ${ctxPct}% · ${history.length} 条消息`) + '\n');
+        const todos = getTodos();
+        if (todos.length > 0) {
+          const active = todos.filter(t => t.status === 'in_progress').length;
+          const pending = todos.filter(t => t.status === 'pending').length;
+          O(G(`  任务: ${active} 进行中 · ${pending} 待办 · ${todos.length} 总计`) + '\n');
+        }
+        O('\n'); continue;
+      }
       if (cmd === '/mcp') {
         if (!mcpClient) { O(y('  MCP 未初始化\n\n')); continue; }
         const servers = mcpClient.getConnectedServers();
@@ -502,54 +542,177 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
         const isSpec = cmd === '/spec';
         const label = isSpec ? 'Spec' : 'Plan';
         const outFile = isSpec ? 'spec.md' : 'plan.md';
+        const checklistFile = isSpec ? 'spec-checklist.md' : 'plan-checklist.md';
         const outPath = join(process.cwd(), outFile);
-        const docType = isSpec
-          ? '产品规格文档（需求概述、功能清单、交互设计、数据结构、API设计、组件树、非功能性需求、测试策略、里程碑）'
-          : '实施方案（需求分析、技术选型、架构设计、数据流、模块划分、实施步骤）';
+        const checklistPath = join(process.cwd(), checklistFile);
 
-        O(b(c(`  ${label} Mode`)) + G(` • ${arg.slice(0, 50)}`) + '\n\n');
+        O('\n' + A.d + '\x1b[90m' + '  ┌──────────────────────────────────────────┐' + A.R + '\n');
+        O(A.d + '\x1b[90m' + '  │' + A.R + b(c(` ${label} Mode · Phase 1`)) + A.d + '\x1b[90m' + '  方案设计' + A.R + A.d + '\x1b[90m' + '              │' + A.R + '\n');
+        O(A.d + '\x1b[90m' + '  └──────────────────────────────────────────┘' + A.R + '\n');
+        O(G(`  📋 ${arg.slice(0, 60)}`) + '\n\n');
 
         const phase1Tools = tools.filter(t =>
           ['read_file','glob_find','list_dir','file_info','batch_read','grep_search','codebase_search','symbol_search','find_references','find_definition','text_search','regex_find','web_search','web_fetch','write_file','edit_file','ask_user','todo_manager'].includes(t.name)
         );
 
-        history.push({ role: 'system', content: `[${label} Mode · Phase 1: 方案设计]
-你是资深${isSpec ? '产品架构师' : '技术架构师'}。当前任务是设计${isSpec ? '产品规格' : '技术方案'}。
+        const specPrompt = isSpec
+          ? `[Spec Mode · Phase 1: 产品规格设计]
+你是资深产品架构师。当前任务是为用户设计完整的产品规格文档。
 
-步骤:
-1. 读取项目现有代码和结构
-2. 用 ask_user 澄清需求和技术决策
-3. 撰写完整${docType}，用 write_file 保存到 \`${outFile}\`
-4. 简要总结方案要点
+## 工作步骤
+1. **调研**: 读取项目现有代码、目录结构、配置文件，理解当前状态
+2. **澄清**: 用 ask_user 澄清需求细节、技术决策、优先级
+3. **设计**: 撰写完整产品规格文档，用 write_file 保存到 \`${outFile}\`
+4. **Checklist**: 生成实施检查清单，用 write_file 保存到 \`${checklistFile}\`
+
+## 规格文档必须包含以下章节
+- # 需求概述（目标用户、核心价值、成功指标）
+- # 功能清单（P0/P1/P2 优先级，每个功能含：描述、验收标准、边界条件）
+- # 交互设计（用户流程图、关键页面线框描述、状态流转）
+- # 数据结构（核心实体、字段定义、关系图）
+- # API 设计（端点、请求/响应格式、错误码）
+- # 组件树（前端组件层级、props/state 设计）
+- # 非功能性需求（性能、安全、可用性、兼容性）
+- # 测试策略（单元/集成/E2E 覆盖范围）
+- # 里程碑（阶段划分、交付物、时间估算）
+
+## Checklist 格式
+生成 \`${checklistFile}\`，格式如下:
+\`\`\`markdown
+# 实施检查清单
+
+## Phase 1: 基础架构
+- [ ] 搭建项目骨架
+- [ ] 配置开发环境
+
+## Phase 2: 核心功能
+- [ ] 实现用户认证
+- [ ] 实现数据模型
+
+## Phase 3: 完善与测试
+- [ ] 编写测试用例
+- [ ] 性能优化
+\`\`\`
 
 **不要写业务代码，只做设计。**
-当前任务：${arg}` });
+当前任务：${arg}`
+          : `[Plan Mode · Phase 1: 技术方案设计]
+你是资深技术架构师。当前任务是为用户设计完整的技术实施方案。
 
+## 工作步骤
+1. **调研**: 读取项目现有代码、目录结构、配置文件，理解当前架构
+2. **澄清**: 用 ask_user 澄清技术选型、架构偏好、约束条件
+3. **设计**: 撰写完整技术方案，用 write_file 保存到 \`${outFile}\`
+4. **Checklist**: 生成实施检查清单，用 write_file 保存到 \`${checklistFile}\`
+
+## 技术方案必须包含以下章节
+- # 需求分析（功能需求、非功能需求、约束条件）
+- # 技术选型（语言/框架/库选择理由、替代方案对比）
+- # 架构设计（系统架构图描述、模块划分、依赖关系）
+- # 数据流（输入→处理→输出、关键数据结构、存储方案）
+- # 模块划分（每个模块：职责、接口、依赖、文件清单）
+- # 实施步骤（按优先级排序，每步含：目标、操作、验证方式）
+
+## Checklist 格式
+生成 \`${checklistFile}\`，格式如下:
+\`\`\`markdown
+# 实施检查清单
+
+## Step 1: 项目初始化
+- [ ] 创建项目结构
+- [ ] 安装依赖
+
+## Step 2: 核心模块
+- [ ] 实现数据层
+- [ ] 实现业务逻辑
+
+## Step 3: 集成与验证
+- [ ] 模块集成测试
+- [ ] 构建验证
+\`\`\`
+
+**不要写业务代码，只做设计。**
+当前任务：${arg}`;
+
+        history.push({ role: 'system', content: specPrompt });
         history.push({ role: 'user', content: arg });
         const p1defs = toolsToDefs(phase1Tools);
         await runLoop(opts, history, phase1Tools, p1defs, confirm);
 
         const planExists = existsSync(outPath);
         if (!planExists) {
-          O(y(`  ${outFile} 未生成，跳过实施\n\n`));
+          O(y(`\n  ⚠ ${outFile} 未生成，跳过实施\n\n`));
           continue;
         }
 
-        try { const c = readFileSync(outPath, 'utf-8'); O(G(`\n  ${outFile}`) + G(` (${c.length}字符)`) + '\n'); } catch {}
+        O('\n' + A.d + '\x1b[90m' + '  ──────────────────────────────────────────' + A.R + '\n');
+        const planContent = readFileSync(outPath, 'utf-8');
+        const lineCount = planContent.split('\n').length;
+        const headings = planContent.split('\n').filter(l => /^#{1,3}\s/.test(l)).map(l => l.replace(/^#+\s*/, '').trim());
+        O(b(c(`  📄 ${outFile}`)) + G(` · ${planContent.length} 字符 · ${lineCount} 行`) + '\n');
+        if (headings.length > 0) {
+          O(A.d + '  章节: ' + A.R);
+          O(headings.slice(0, 8).map(h => G(h)).join(A.d + ' → ' + A.R));
+          if (headings.length > 8) O(A.d + ' …' + A.R);
+          O('\n');
+        }
 
+        const checklistExists = existsSync(checklistPath);
+        if (checklistExists) {
+          const clContent = readFileSync(checklistPath, 'utf-8');
+          const items = clContent.split('\n').filter(l => /- \[ \]/.test(l));
+          const phases = clContent.split('\n').filter(l => /^##\s/.test(l)).map(l => l.replace(/^##\s*/, ''));
+          O(b(c(`  ✅ ${checklistFile}`)) + G(` · ${items.length} 检查项 · ${phases.length} 阶段`) + '\n');
+          if (phases.length > 0) {
+            O(A.d + '  阶段: ' + A.R + phases.map(p => G(p)).join(A.d + ' → ' + A.R) + '\n');
+          }
+        }
+
+        O('\n');
         const doImplement = await confirm(`开始按 ${outFile} 实施?`);
-        if (!doImplement) { O(G(' 方案已保存，可稍后继续\n\n')); continue; }
+        if (!doImplement) { O(G('  方案已保存，可稍后 /plan 或 /spec 继续\n\n')); continue; }
 
-        const planContent = readFileSync(outPath, 'utf-8').slice(0, 6000);
-        history.push({ role: 'system', content: `[${label} Mode · Phase 2: 实施]\n严格按 \`${outFile}\` 方案实施。每完成一步更新 todo_manager。遇问题用 ask_user 确认。\n\n[方案内容]\n${planContent}` });
+        O('\n' + A.d + '\x1b[90m' + '  ┌──────────────────────────────────────────┐' + A.R + '\n');
+        O(A.d + '\x1b[90m' + '  │' + A.R + b(g(` ${label} Mode · Phase 2`)) + A.d + '\x1b[90m' + '  实施' + A.R + A.d + '\x1b[90m' + '                    │' + A.R + '\n');
+        O(A.d + '\x1b[90m' + '  └──────────────────────────────────────────┘' + A.R + '\n');
+        O(G(`  🔧 严格按 ${outFile} 方案实施`) + '\n\n');
+
+        const planSlice = planContent.slice(0, 6000);
+        const checklistSlice = checklistExists ? '\n\n[实施检查清单]\n' + readFileSync(checklistPath, 'utf-8').slice(0, 3000) : '';
+        history.push({ role: 'system', content: `[${label} Mode · Phase 2: 实施]
+严格按 \`${outFile}\` 方案逐项实施。
+
+## 实施规则
+1. 按 checklist 顺序逐项完成，每完成一项用 todo_manager 标记
+2. 每个实施步骤完成后立即验证（构建/测试）
+3. 遇到方案与实际不符时，用 ask_user 确认后再调整
+4. 不要跳过任何步骤，不要合并多个步骤
+5. 实施完成后运行完整验证
+
+[方案内容]
+${planSlice}${checklistSlice}` });
 
         const p2defs = toolsToDefs(tools);
         await runLoop(opts, history, tools, p2defs, confirm);
+
+        if (checklistExists) {
+          try {
+            const finalCl = readFileSync(checklistPath, 'utf-8');
+            const done = (finalCl.match(/- \[x\]/g) || []).length;
+            const total = (finalCl.match(/- \[[ x]\]/g) || []).length;
+            const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+            O(A.d + '\x1b[90m' + '  ──────────────────────────────────────────' + A.R + '\n');
+            O(b(c(`  📊 ${label} 完成`)) + G(` · Checklist: ${done}/${total} (${pct}%)`) + '\n\n');
+          } catch {}
+        }
         continue;
       }
       if (cmd === '/review') {
         const target = arg || '.';
-        O(b(c('  Review Mode')) + G(` • ${target}`) + '\n\n');
+        O('\n' + A.d + '\x1b[90m' + '  ┌──────────────────────────────────────────┐' + A.R + '\n');
+        O(A.d + '\x1b[90m' + '  │' + A.R + b(c(' Review Mode')) + A.d + '\x1b[90m' + '  代码审查' + A.R + A.d + '\x1b[90m' + '                   │' + A.R + '\n');
+        O(A.d + '\x1b[90m' + '  └──────────────────────────────────────────┘' + A.R + '\n');
+        O(G(`  📋 ${target}`) + '\n\n');
         history.push({ role: 'system', content: `[Review Mode]
 你是一位资深代码审查专家。请对指定代码进行全面审查：
 
@@ -570,7 +733,9 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
         continue;
       }
       if (cmd === '/commit') {
-        O(b(c('  Commit Mode')) + G(' • 智能提交') + '\n\n');
+        O('\n' + A.d + '\x1b[90m' + '  ┌──────────────────────────────────────────┐' + A.R + '\n');
+        O(A.d + '\x1b[90m' + '  │' + A.R + b(g(' Commit Mode')) + A.d + '\x1b[90m' + '  智能提交' + A.R + A.d + '\x1b[90m' + '                   │' + A.R + '\n');
+        O(A.d + '\x1b[90m' + '  └──────────────────────────────────────────┘' + A.R + '\n\n');
         try {
           const statusOut = execSync('git status --porcelain', { encoding: 'utf-8', timeout: 10000, cwd: process.cwd() });
           if (!statusOut.trim()) { O(y('  没有未提交的变更\n\n')); continue; }
@@ -608,7 +773,10 @@ ${diffOut || stagedOut || '无staged变更'}` });
       }
       if (cmd === '/analyze') {
         const target = arg || process.cwd();
-        O(b(c('  Analyze Mode')) + G(` • ${target}`) + '\n\n');
+        O('\n' + A.d + '\x1b[90m' + '  ┌──────────────────────────────────────────┐' + A.R + '\n');
+        O(A.d + '\x1b[90m' + '  │' + A.R + b(c(' Analyze Mode')) + A.d + '\x1b[90m' + '  项目分析' + A.R + A.d + '\x1b[90m' + '                   │' + A.R + '\n');
+        O(A.d + '\x1b[90m' + '  └──────────────────────────────────────────┘' + A.R + '\n');
+        O(G(`  📊 ${target}`) + '\n\n');
         history.push({ role: 'system', content: `[Analyze Mode]
 你是一位项目架构分析师。请对项目进行全面分析：
 
@@ -632,7 +800,10 @@ ${diffOut || stagedOut || '无staged变更'}` });
       }
       if (cmd === '/fix') {
         const target = arg || '';
-        O(b(c('  Fix Mode')) + G(' • 自动修复') + '\n\n');
+        O('\n' + A.d + '\x1b[90m' + '  ┌──────────────────────────────────────────┐' + A.R + '\n');
+        O(A.d + '\x1b[90m' + '  │' + A.R + b(y(' Fix Mode')) + A.d + '\x1b[90m' + '  自动修复' + A.R + A.d + '\x1b[90m' + '                   │' + A.R + '\n');
+        O(A.d + '\x1b[90m' + '  └──────────────────────────────────────────┘' + A.R + '\n');
+        O(G(`  🔧 ${target || '自动检测并修复所有构建/测试错误'}`) + '\n\n');
         history.push({ role: 'system', content: `[Fix Mode]
 你是一位自动修复工程师。请执行以下流程：
 
@@ -808,13 +979,14 @@ async function runLoop(
             const spin = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏';
             let si = 0;
             const tStart = Date.now();
+            const tcIcon = TOOL_ICONS[tc.name] || '▸';
             stopTcSpin();
             Oflush(); O('\r' + ' '.repeat(cols) + '\r');
             tcSpinIv = setInterval(() => {
               const el = (Date.now() - tStart) / 1000;
               si = (si + 1) % 8;
               Oflush();
-              try { process.stdout.write(`\r ${A.c}${spin[si]}${A.R} ${G(tc.name)}  ${A.d}${el.toFixed(1)}s${A.R}     `); } catch {}
+              try { process.stdout.write(`\r ${A.c}${spin[si]}${A.R} ${tcIcon} ${G(tc.name)}  ${A.d}${el.toFixed(1)}s${A.R}     `); } catch {}
             }, 80);
           }
         }
@@ -877,13 +1049,13 @@ async function runLoop(
 
       if (safe.length >= 1) {
         const n = safe.length;
-        const st = Date.now();
+        const ptStart = Date.now();
         const spinChars = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏';
         const parAnimIv = setInterval(() => {
-          const el = ((Date.now() - st) / 1000).toFixed(1);
-          const si = Math.floor(((Date.now() - st) / 1000 * 8)) % 8;
+          const ptEl = ((Date.now() - ptStart) / 1000).toFixed(1);
+          const si = Math.floor(((Date.now() - ptStart) / 1000 * 8)) % 8;
           Oflush();
-          try { process.stdout.write(`\r${' '.repeat(cols)}\r ${A.c}${spinChars[si]}${A.R} ${G(`${n} tools running`)}  ${A.d}${el}s${A.R}     `); } catch {}
+          try { process.stdout.write(`\r${' '.repeat(cols)}\r ${A.c}${spinChars[si]}${A.R} ${G(`${n} 个工具执行中`)}  ${A.d}${ptEl}s${A.R}     `); } catch {}
         }, 80);
         const sig = currentAbortController!.signal;
         const results = await Promise.allSettled(safe.map(async tc => { try { const r = await execTool(tc, tools, opts, sig, undefined, true); doneTools++; return r; } catch (e) { return { role: 'tool', content: `Error: ${e instanceof Error ? e.message : String(e)}`, tool_call_id: tc.id, name: tc.name } as Message; } }));
@@ -928,8 +1100,18 @@ async function runLoop(
     else { stagnation++; }
 
     const ctxPct = ((totalCtx / CONTEXT_LIMIT) * 100).toFixed(1);
-    const ctxWarn = totalCtx > CTX_WARN ? y(` ${ctxPct}%`) : G(` ${ctxPct}%`);
-    O(G(`  ▸ ${(el / 1000).toFixed(1)}s · ${ttc} 工具 · 上下文${ctxWarn}`) + '\n\n');
+    const ctxBar = (() => {
+      const pct = totalCtx / CONTEXT_LIMIT;
+      const width = 12;
+      const filled = Math.round(pct * width);
+      const bar = '█'.repeat(Math.min(filled, width)) + '░'.repeat(Math.max(width - filled, 0));
+      if (pct > 0.85) return y(bar);
+      if (pct > 0.6) return A.m + bar + A.R;
+      return G(bar);
+    })();
+    const thinkInfo = th ? A.d + ` · 思考${((th.length / 4) | 0)}词` + A.R : '';
+    O(A.d + '\x1b[90m' + '  ──────────────────────────────────────────' + A.R + '\n');
+    O(G(`  ▸ ${(el / 1000).toFixed(1)}s · ${ttc} 工具 · 上下文 `) + ctxBar + G(` ${ctxPct}%`) + thinkInfo + '\n\n');
     trimHistory(history, MAX_HISTORY);
 
     if (fc) {
@@ -975,6 +1157,7 @@ async function execTool(
 
   const fp = (tc.args.file_path || tc.args.path || tc.args.file || '') as string;
   const meta: string[] = [];
+  const icon = TOOL_ICONS[tc.name] || '▸';
   if (tc.name === 'write_file' || tc.name === 'edit_file') {
     if (fp) meta.push(fp.split(/[/\\]/).filter(Boolean).slice(-2).join('/'));
     const content = String(tc.args.content || '');
@@ -982,6 +1165,9 @@ async function execTool(
   } else if (tc.name === 'web_search' || tc.name === 'web_fetch' || tc.name === 'read_file') {
     const q = String(tc.args.query || tc.args.url || tc.args.file_path || '');
     if (q) meta.push(q.slice(0, 40));
+  } else if (tc.name === 'run_command' || tc.name === 'run_async') {
+    const cmd = String(tc.args.command || '');
+    if (cmd) meta.push(cmd.slice(0, 35));
   }
   const label = meta.length ? `${tc.name}  ${A.d}${meta.join(' · ')}${A.R}` : tc.name;
 
@@ -990,7 +1176,7 @@ async function execTool(
       const el = (Date.now() - toolStart) / 1000;
       const si = Math.floor(el * 8) % 8;
       Oflush();
-      try { process.stdout.write(`\r${' '.repeat(cols)}\r ${A.c}${spinner[si]}${A.R} ${G(label)}  ${A.d}${el.toFixed(1)}s${A.R}     `); } catch {}
+      try { process.stdout.write(`\r${' '.repeat(cols)}\r ${A.c}${spinner[si]}${A.R} ${icon} ${G(label)}  ${A.d}${el.toFixed(1)}s${A.R}     `); } catch {}
     };
     animTick();
     execAnimIv = setInterval(animTick, 80);
@@ -1024,9 +1210,13 @@ async function execTool(
       brief = '任务已更新';
     } else if (tc.name === 'ask_user') {
       brief = rawResult.slice(0, 80);
+    } else if (tc.name === 'run_command' || tc.name === 'run_async') {
+      const exitLine = rawResult.split('\n').filter(l => l.trim()).slice(-1)[0];
+      brief = exitLine ? exitLine.slice(0, 60) : rawResult.replace(/\n/g, ' ').slice(0, 60);
     } else {
       brief = rawResult.replace(/\n/g, ' ').slice(0, 60);
     }
+    const toolEl = ((Date.now() - toolStart) / 1000).toFixed(1);
     Oflush(); O('\r' + ' '.repeat(cols) + '\r');
     if (tc.name === 'todo_manager' && result.success) {
       O(A.y + A.b + '  ▸▸ █ 任务面板' + A.R + '\n');
@@ -1053,9 +1243,11 @@ async function execTool(
       }
       O('\n');
     } else if (tc.name === 'ask_user') {
-      O(y(' ?') + G(` ${c(tc.name)} ${brief}\n`));
+      O(y(` ${icon}`) + G(` ${c(tc.name)}`) + A.d + ` ${toolEl}s` + A.R + G(` ${brief}`) + '\n');
+    } else if (result.success) {
+      O(g(` ${icon}`) + G(` ${c(tc.name)}`) + A.d + ` ${toolEl}s` + A.R + G(` ${brief}`) + '\n');
     } else {
-      O(g(' ✓') + G(` ${c(tc.name)} ${brief}\n`));
+      O(r(` ${icon}`) + G(` ${c(tc.name)}`) + A.d + ` ${toolEl}s` + A.R + r(` ✗ ${brief.slice(0, 50)}`) + '\n');
     }
     if (result.success) {
       xmemory.storeWorking(`${tc.name}: ${brief}`, [tc.name, 'tool']);
@@ -1069,7 +1261,7 @@ async function execTool(
     clearInterval(execAnimIv);
     const em = e instanceof Error ? e.message : String(e);
     Oflush(); O('\r' + ' '.repeat(cols) + '\r');
-    O(r(' ✗') + G(` ${tc.name} ${em.slice(0, 60)}\n`));
+    O(r(` ${icon || '✗'}`) + G(` ${tc.name}`) + r(` ${em.slice(0, 60)}`) + '\n');
     return { role: 'tool', content: `Error: ${em}`, tool_call_id: tc.id, name: tc.name };
   }
 }
