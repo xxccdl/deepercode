@@ -901,8 +901,7 @@ async function runLoop(
   for (let iter = 0; ; iter++) {
     const cols = process.stdout.columns || 80;
     let msgs = buildMsgs(history);
-    const ctxTokens = estimateMessageTokens(msgs, toolDefs.map(t => ({ type: 'function', function: { name: t.function.name, description: t.function.description, parameters: t.function.parameters } })));
-    const totalCtx = ctxTokens;
+    let totalCtx = estimateMessageTokens(msgs, toolDefs.map(t => ({ type: 'function', function: { name: t.function.name, description: t.function.description, parameters: t.function.parameters } })));
     const nearLimit = totalCtx > CONTEXT_LIMIT * 0.95;
 
     if (totalCtx > CONTEXT_LIMIT * 0.7 && history.length > 10) {
@@ -1096,7 +1095,10 @@ async function runLoop(
 
     currentAbortController = null;
 
-    if (fc) { history.push({ role: 'assistant', content: fc, reasoning_content: th || undefined }); stagnation = 0; }
+    if (fc) { history.push({ role: 'assistant', content: fc, reasoning_content: th || undefined }); stagnation = 0;
+      msgs = buildMsgs(history);
+      totalCtx = estimateMessageTokens(msgs, toolDefs.map(t => ({ type: 'function', function: { name: t.function.name, description: t.function.description, parameters: t.function.parameters } })));
+    }
     else { stagnation++; }
 
     const ctxPct = ((totalCtx / CONTEXT_LIMIT) * 100).toFixed(1);

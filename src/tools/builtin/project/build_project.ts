@@ -1,6 +1,7 @@
-import { execSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { readFileSync, existsSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { resolve as pathResolve } from 'node:path';
+import { decodeBuffer } from '../shell/process-pool.js';
 import type { Tool } from '../../tool-types.js';
 
 export const build_project: Tool = {
@@ -19,21 +20,21 @@ export const build_project: Tool = {
   dangerous: false,
   requiresApproval: true,
   async execute(params) {
-    try {
+    return new Promise((resolve) => {
       const cwd = (params.cwd as string) ?? process.cwd();
       const target = (params.target as string) ?? 'prod';
       const tool = (params.tool as string) ?? 'auto';
 
       let cmd = '';
-      const pkgPath = resolve(cwd, 'package.json');
+      const pkgPath = pathResolve(cwd, 'package.json');
 
       if (tool === 'auto' && existsSync(pkgPath)) {
         const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'));
         const scripts = pkg.scripts || {};
-        if (scripts.build) cmd = `npm run build`;
-        else if (scripts.compile) cmd = `npm run compile`;
-        else if (scripts.bundle) cmd = `npm run bundle`;
-        else cmd = `npx tsup src/index.ts --format esm`;
+        if (scripts.build) cmd = 'npm run build';
+        else if (scripts.compile) cmd = 'npm run compile';
+        else if (scripts.bundle) cmd = 'npm run bundle';
+        else cmd = 'npx tsup src/index.ts --format esm';
       } else {
         switch (tool) {
           case 'tsup': cmd = 'npx tsup src/index.ts --format esm'; break;
@@ -43,26 +44,46 @@ export const build_project: Tool = {
         }
       }
 
-      const output = execSync(cmd, {
-        cwd,
-        encoding: 'utf-8',
-        timeout: 180000,
-        maxBuffer: 50 * 1024 * 1024,
-        stdio: 'pipe',
+      const proc = spawn(cmd, {
+        cwd, shell: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
       });
 
-      return {
-        success: true,
-        output: `构建完成\n${output.slice(0, 10000)}`,
-        metadata: { cwd, tool, command: cmd },
-      };
-    } catch (err: unknown) {
-      const e = err as { message?: string; stdout?: string; stderr?: string };
-      return {
-        success: false,
-        error: '构建失败: ' + (e.message || String(err)),
-        output: (e.stdout || '') + (e.stderr || ''),
-      };
-    }
+      const timer = setTimeout(() => {
+        try { proc.kill(); } catch {}
+        resolve({ success: false, error: '构建超时 (180s)', output: '' });
+      }, 180_000);
+
+      const stdoutChunks: Buffer[] = [];
+      const stderrChunks: Buffer[] = [];
+      proc.stdout?.on('data', (chunk: Buffer) => stdoutChunks.push(chunk));
+      proc.stderr?.on('data', (chunk: Buffer) => stderrChunks.push(chunk));
+
+      proc.on('error', (err: Error) => {
+        clearTimeout(timer);
+        resolve({ success: false, error: '构建失败: ' + err.message, output: '' });
+      });
+
+      proc.on('close', (code: number | null) => {
+        clearTimeout(timer);
+        const stdout = decodeBuffer(stdoutChunks);
+        const stderr = decodeBuffer(stderrChunks);
+        const rawOutput = stdout + (stderr ? `\n[stderr]\n${stderr}` : '');
+
+        if (code === 0) {
+          resolve({
+            success: true,
+            output: `构建完成\n${rawOutput.slice(0, 10000)}`,
+            metadata: { cwd, tool, command: cmd },
+          });
+        } else {
+          resolve({
+            success: false,
+            error: `构建失败 (exit code: ${code})`,
+            output: rawOutput.slice(0, 8000),
+          });
+        }
+      });
+    });
   },
 };

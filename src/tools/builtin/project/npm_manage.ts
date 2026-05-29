@@ -1,4 +1,5 @@
-import { execSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
+import { decodeBuffer } from '../shell/process-pool.js';
 import type { Tool } from '../../tool-types.js';
 
 export const npm_manage: Tool = {
@@ -19,7 +20,7 @@ export const npm_manage: Tool = {
   dangerous: false,
   requiresApproval: true,
   async execute(params) {
-    try {
+    return new Promise((resolve) => {
       const action = params.action as string;
       const pkg = params.package as string | undefined;
       const cwd = (params.cwd as string) ?? process.cwd();
@@ -50,22 +51,38 @@ export const npm_manage: Tool = {
           break;
       }
 
-      const output = execSync(cmd, {
-        cwd,
-        encoding: 'utf-8',
-        timeout: 120000,
-        maxBuffer: 50 * 1024 * 1024,
-        stdio: 'pipe',
+      const proc = spawn(cmd, {
+        cwd, shell: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
       });
 
-      return { success: true, output: output || `${action} 完成`, metadata: { action, cwd } };
-    } catch (err: unknown) {
-      const e = err as { message?: string; stdout?: string; stderr?: string };
-      return {
-        success: false,
-        error: e.message || String(err),
-        output: (e.stdout || '') + (e.stderr || ''),
-      };
-    }
+      const timer = setTimeout(() => {
+        try { proc.kill(); } catch {}
+        resolve({ success: false, error: 'npm 命令超时 (120s)', output: '' });
+      }, 120_000);
+
+      const stdoutChunks: Buffer[] = [];
+      const stderrChunks: Buffer[] = [];
+      proc.stdout?.on('data', (chunk: Buffer) => stdoutChunks.push(chunk));
+      proc.stderr?.on('data', (chunk: Buffer) => stderrChunks.push(chunk));
+
+      proc.on('error', (err: Error) => {
+        clearTimeout(timer);
+        resolve({ success: false, error: err.message, output: '' });
+      });
+
+      proc.on('close', (code: number | null) => {
+        clearTimeout(timer);
+        const stdout = decodeBuffer(stdoutChunks);
+        const stderr = decodeBuffer(stderrChunks);
+        const output = (stdout + (stderr ? `\n[stderr]\n${stderr}` : '')).slice(0, 8000);
+
+        if (code === 0) {
+          resolve({ success: true, output: output || `${action} 完成`, metadata: { action, cwd } });
+        } else {
+          resolve({ success: false, error: `Exit code: ${code}`, output });
+        }
+      });
+    });
   },
 };
