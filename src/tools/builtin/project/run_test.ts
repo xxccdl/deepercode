@@ -1,6 +1,7 @@
-import { execSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { readFileSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { decodeBuffer } from '../shell/process-pool.js';
 import type { Tool } from '../../tool-types.js';
 
 export const run_test: Tool = {
@@ -20,7 +21,7 @@ export const run_test: Tool = {
   dangerous: false,
   requiresApproval: true,
   async execute(params) {
-    try {
+    return new Promise((res) => {
       const cwd = (params.cwd as string) ?? process.cwd();
       const testFile = params.test_file as string | undefined;
       const runner = (params.runner as string) ?? 'auto';
@@ -49,26 +50,46 @@ export const run_test: Tool = {
       if (testFile) cmd += ` "${testFile}"`;
       if (coverage) cmd += ' --coverage';
 
-      const output = execSync(cmd, {
-        cwd,
-        encoding: 'utf-8',
-        timeout: 180000,
-        maxBuffer: 50 * 1024 * 1024,
-        stdio: 'pipe',
+      const proc = spawn(cmd, {
+        cwd, shell: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
       });
 
-      return {
-        success: true,
-        output: `测试完成\n${output.slice(0, 10000)}`,
-        metadata: { cwd, coverage },
-      };
-    } catch (err: unknown) {
-      const e = err as { message?: string; stdout?: string; stderr?: string };
-      return {
-        success: false,
-        error: '测试失败',
-        output: (e.stdout || '') + (e.stderr || ''),
-      };
-    }
+      const timer = setTimeout(() => {
+        try { proc.kill(); } catch {}
+        res({ success: false, error: '测试超时 (180s)', output: '' });
+      }, 180_000);
+
+      const stdoutChunks: Buffer[] = [];
+      const stderrChunks: Buffer[] = [];
+      proc.stdout?.on('data', (chunk: Buffer) => stdoutChunks.push(chunk));
+      proc.stderr?.on('data', (chunk: Buffer) => stderrChunks.push(chunk));
+
+      proc.on('error', (err: Error) => {
+        clearTimeout(timer);
+        res({ success: false, error: '测试失败: ' + err.message, output: '' });
+      });
+
+      proc.on('close', (code: number | null) => {
+        clearTimeout(timer);
+        const stdout = decodeBuffer(stdoutChunks);
+        const stderr = decodeBuffer(stderrChunks);
+        const rawOutput = stdout + (stderr ? `\n[stderr]\n${stderr}` : '');
+
+        if (code === 0) {
+          res({
+            success: true,
+            output: `测试完成\n${rawOutput.slice(0, 10000)}`,
+            metadata: { cwd, coverage },
+          });
+        } else {
+          res({
+            success: false,
+            error: `测试失败 (exit code: ${code})`,
+            output: rawOutput.slice(0, 8000),
+          });
+        }
+      });
+    });
   },
 };

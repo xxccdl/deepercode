@@ -1,6 +1,7 @@
-import { execSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { readFileSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { decodeBuffer } from '../shell/process-pool.js';
 import type { Tool } from '../../tool-types.js';
 
 export const coverage_report: Tool = {
@@ -19,7 +20,7 @@ export const coverage_report: Tool = {
   dangerous: false,
   requiresApproval: false,
   async execute(params) {
-    try {
+    return new Promise((resolve) => {
       const cwd = (params.cwd as string) ?? process.cwd();
       const runner = (params.runner as string) ?? 'vitest';
       const format = (params.format as string) ?? 'text';
@@ -31,29 +32,46 @@ export const coverage_report: Tool = {
         case 'nyc': cmd = `npx nyc --reporter=${format} npm test`; break;
       }
 
-      try {
-        const output = execSync(cmd, {
-          cwd,
-          encoding: 'utf-8',
-          timeout: 180000,
-          maxBuffer: 50 * 1024 * 1024,
-          stdio: 'pipe',
-        });
-        return {
-          success: true,
-          output: `覆盖报告:\n${output.slice(0, 10000)}`,
-          metadata: { runner, format, cwd },
-        };
-      } catch (err: unknown) {
-        const e = err as { stdout?: string; stderr?: string };
-        return {
-          success: false,
-          error: '覆盖报告生成失败',
-          output: (e.stdout || '') + (e.stderr || ''),
-        };
-      }
-    } catch (err: unknown) {
-      return { success: false, error: (err as Error).message, output: '' };
-    }
+      const proc = spawn(cmd, {
+        cwd, shell: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+
+      const timer = setTimeout(() => {
+        try { proc.kill(); } catch {}
+        resolve({ success: false, error: '覆盖报告生成超时 (180s)', output: '' });
+      }, 180_000);
+
+      const stdoutChunks: Buffer[] = [];
+      const stderrChunks: Buffer[] = [];
+      proc.stdout?.on('data', (chunk: Buffer) => stdoutChunks.push(chunk));
+      proc.stderr?.on('data', (chunk: Buffer) => stderrChunks.push(chunk));
+
+      proc.on('error', (err: Error) => {
+        clearTimeout(timer);
+        resolve({ success: false, error: '覆盖报告生成失败: ' + err.message, output: '' });
+      });
+
+      proc.on('close', (code: number | null) => {
+        clearTimeout(timer);
+        const stdout = decodeBuffer(stdoutChunks);
+        const stderr = decodeBuffer(stderrChunks);
+        const rawOutput = stdout + (stderr ? `\n[stderr]\n${stderr}` : '');
+
+        if (code === 0) {
+          resolve({
+            success: true,
+            output: `覆盖报告:\n${rawOutput.slice(0, 10000)}`,
+            metadata: { runner, format, cwd },
+          });
+        } else {
+          resolve({
+            success: false,
+            error: `覆盖报告生成失败 (exit code: ${code})`,
+            output: rawOutput.slice(0, 8000),
+          });
+        }
+      });
+    });
   },
 };

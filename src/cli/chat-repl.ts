@@ -41,8 +41,6 @@ const CONTEXT_LIMIT = 1_048_576;
 const CTX_WARN = 786_432;
 const TOOL_RESULT_MAX = 4000;
 const SESSION_DIR = join(DEEPER_HOME, 'sessions');
-const AUTOSAVE_FILE = join(SESSION_DIR, '_autosave.json');
-
 const TOOL_TIMEOUT_MAP: Record<string, number> = {
   run_command: 120_000, run_async: 120_000, pipe_commands: 120_000,
   shell_script: 120_000, build_project: 180_000, run_test: 180_000,
@@ -224,6 +222,8 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
     if (isBg) {
       run().then(result => {
         history.push({ role: 'system', content: `[子代理] ${task.slice(0, 50)} → ${result.slice(0, 300)}` });
+      }).catch(err => {
+        history.push({ role: 'system', content: `[子代理错误] ${err}` });
       });
       return `后台子代理已启动: ${task.slice(0, 80)}`;
     }
@@ -316,14 +316,18 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
     Oflush();
     if (q.header) process.stdout.write(c(`\n  ? ${q.header}\n`));
     if (q.options && q.options.length > 0) {
+      Oflush();
       process.stdout.write(y(`  ${q.question}\n`));
       for (let i = 0; i < q.options.length; i++) {
         process.stdout.write(G(`    ${i + 1}. ${q.options[i]}\n`));
       }
       const hint = q.multiSelect ? '多个编号，空格分隔' : '输入编号';
+      Oflush();
       process.stdout.write(G(`  ${hint}: `));
     } else {
+      Oflush();
       process.stdout.write(y(`  ${q.question}\n`));
+      Oflush();
       process.stdout.write(G('  > '));
     }
     const a = await new Promise<string>(r2 => { resolveLine = r2; rl.prompt(true); });
@@ -956,8 +960,7 @@ async function runLoop(
           if (fc.length > 100_000) fc = fc.slice(-80_000);
           if (fc === t) {
             if (showingThink) { showingThink = false; stopStreamAnim(); }
-            if (tcSpinIv) { stopTcSpin(); Oflush(); O('\r' + ' '.repeat(cols) + '\r'); }
-            else { Oflush(); O('\r' + ' '.repeat(cols) + '\r'); }
+            stopTcSpin(); Oflush(); O('\r' + ' '.repeat(cols) + '\r');
             if (fc.length === t.length) O(b(c('●')) + ' ');
           }
           const rendered = md.feed(t);
@@ -1060,6 +1063,7 @@ async function runLoop(
         const results = await Promise.allSettled(safe.map(async tc => { try { const r = await execTool(tc, tools, opts, sig, undefined, true); doneTools++; return r; } catch (e) { return { role: 'tool', content: `Error: ${e instanceof Error ? e.message : String(e)}`, tool_call_id: tc.id, name: tc.name } as Message; } }));
         clearInterval(parAnimIv);
         Oflush();
+        O('\r' + ' '.repeat(cols) + '\r');
         for (const r of results) {
           if (r.status === 'fulfilled') { history.push(r.value); ttc++; GS.tc++; }
           else { history.push({ role: 'tool', content: `Error: ${String(r.reason)}`, tool_call_id: 'parallel', name: 'parallel' }); }

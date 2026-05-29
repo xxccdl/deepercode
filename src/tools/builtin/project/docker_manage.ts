@@ -1,6 +1,7 @@
-import { execSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { decodeBuffer } from '../shell/process-pool.js';
 import type { Tool } from '../../tool-types.js';
 
 export const docker_manage: Tool = {
@@ -22,7 +23,7 @@ export const docker_manage: Tool = {
   dangerous: false,
   requiresApproval: true,
   async execute(params) {
-    try {
+    return new Promise((res) => {
       const action = params.action as string;
       const image = params.image as string | undefined;
       const container = params.container as string | undefined;
@@ -36,7 +37,8 @@ export const docker_manage: Tool = {
         case 'build': {
           const dockerfile = resolve(cwd, 'Dockerfile');
           if (!existsSync(dockerfile)) {
-            return { success: false, error: `Dockerfile 不存在: ${dockerfile}`, output: '' };
+            res({ success: false, error: `Dockerfile 不存在: ${dockerfile}`, output: '' });
+            return;
           }
           cmd = `docker build ${options} -t ${image || 'app'} .`;
           break;
@@ -63,28 +65,42 @@ export const docker_manage: Tool = {
           cmd = `docker pull ${image || ''}`;
           break;
         default:
-          return { success: false, error: `不支持的操作: ${action}`, output: '' };
+          res({ success: false, error: `不支持的操作: ${action}`, output: '' });
+          return;
       }
 
-      try {
-        const output = execSync(cmd, {
-          cwd,
-          encoding: 'utf-8',
-          timeout: 120000,
-          maxBuffer: 10 * 1024 * 1024,
-          stdio: 'pipe',
-        });
-        return { success: true, output: output || `${action} 完成`, metadata: { action } };
-      } catch (err: unknown) {
-        const e = err as { message?: string; stdout?: string; stderr?: string };
-        return {
-          success: false,
-          error: `Docker 操作失败: ${e.message || String(err)}`,
-          output: (e.stdout || '') + (e.stderr || ''),
-        };
-      }
-    } catch (err: unknown) {
-      return { success: false, error: (err as Error).message, output: '' };
-    }
+      const proc = spawn(cmd, {
+        cwd, shell: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+
+      const timer = setTimeout(() => {
+        try { proc.kill(); } catch {}
+        res({ success: false, error: 'Docker 操作超时 (120s)', output: '' });
+      }, 120_000);
+
+      const stdoutChunks: Buffer[] = [];
+      const stderrChunks: Buffer[] = [];
+      proc.stdout?.on('data', (chunk: Buffer) => stdoutChunks.push(chunk));
+      proc.stderr?.on('data', (chunk: Buffer) => stderrChunks.push(chunk));
+
+      proc.on('error', (err: Error) => {
+        clearTimeout(timer);
+        res({ success: false, error: `Docker 操作失败: ${err.message}`, output: '' });
+      });
+
+      proc.on('close', (code: number | null) => {
+        clearTimeout(timer);
+        const stdout = decodeBuffer(stdoutChunks);
+        const stderr = decodeBuffer(stderrChunks);
+        const rawOutput = stdout + (stderr ? `\n[stderr]\n${stderr}` : '');
+
+        if (code === 0) {
+          res({ success: true, output: rawOutput || `${action} 完成`, metadata: { action } });
+        } else {
+          res({ success: false, error: `Docker 操作失败 (exit code: ${code})`, output: rawOutput });
+        }
+      });
+    });
   },
 };
