@@ -15,6 +15,7 @@
   "files": [
     "dist",
     "src",
+    "vendor",
     "README.md",
     "LICENSE"
   ],
@@ -23,7 +24,8 @@
     "build": "tsup",
     "lint": "eslint .",
     "preview": "vite preview",
-    "check": "tsc -b --noEmit"
+    "check": "tsc -b --noEmit",
+    "prepublishOnly": "node scripts/prepublish.mjs"
   },
   "keywords": [
     "ai",

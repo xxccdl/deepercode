@@ -1,133 +1,87 @@
-import { existsSync, mkdirSync, createWriteStream, unlinkSync, renameSync, readdirSync, rmSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { existsSync, mkdirSync, copyFileSync, readFileSync, writeFileSync } from 'node:fs';
+import { join, resolve, dirname } from 'node:path';
 import { execSync } from 'node:child_process';
-import { get as httpsGet } from 'node:https';
+import { fileURLToPath } from 'node:url';
 import { DEEPER_HOME } from '../../core/constants.js';
 import { getConfig, updateConfig, type MCPConfigEntry } from '../../core/config.js';
 
 const BIN_DIR = join(DEEPER_HOME, 'bin');
-const UV_EXE = join(BIN_DIR, 'uv.exe');
 const MCP_DIR = join(DEEPER_HOME, 'mcp_servers', 'windows-mcp');
+const PY_DIR = join(DEEPER_HOME, 'python313');
 const SERVER_NAME = 'windows-mcp';
-const MCP_ZIP_URL = 'https://github.com/CursorTouch/Windows-MCP/archive/refs/heads/main.zip';
-const UV_DOWNLOAD_URL = process.arch === 'arm64'
-  ? 'https://github.com/astral-sh/uv/releases/latest/download/uv-aarch64-pc-windows-msvc.zip'
-  : 'https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-pc-windows-msvc.zip';
+
+let _cachedVendorDir: string | null = null;
+function getVendorDir(): string {
+  if (_cachedVendorDir) return _cachedVendorDir;
+  try {
+    const dir = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'vendor');
+    if (existsSync(join(dir, '.ready'))) { _cachedVendorDir = dir; return dir; }
+  } catch {}
+  const fallback = resolve(process.cwd(), 'vendor');
+  if (existsSync(join(fallback, '.ready'))) { _cachedVendorDir = fallback; return fallback; }
+  return '';
+}
 
 function log(msg: string) { console.log(`  ${msg}`); }
 function ok(msg: string) { console.log(`  ✅ ${msg}`); }
-function warn(msg: string) { console.log(`  ⚠️ ${msg}`); }
 function err(msg: string) { console.error(`  ❌ ${msg}`); }
-
 function ensureDir(dir: string) { if (!existsSync(dir)) mkdirSync(dir, { recursive: true }); }
 
-function downloadFile(url: string, dest: string, timeoutSec = 300): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const file = createWriteStream(dest);
-    const timer = setTimeout(() => { file.close(); try { unlinkSync(dest); } catch {} reject(new Error('下载超时')); }, timeoutSec * 1000);
-    httpsGet(url, { headers: { 'User-Agent': 'DeeperCode/1.0' } }, (res) => {
-      if (res.statusCode === 301 || res.statusCode === 302) {
-        file.close(); try { unlinkSync(dest); } catch {}
-        clearTimeout(timer);
-        downloadFile(res.headers.location || '', dest, timeoutSec).then(resolve, reject);
-        return;
-      }
-      if (res.statusCode !== 200) { file.close(); try { unlinkSync(dest); } catch {} clearTimeout(timer); reject(new Error(`HTTP ${res.statusCode}`)); return; }
-      res.pipe(file);
-      file.on('finish', () => { clearTimeout(timer); file.close(); resolve(); });
-      file.on('error', (e) => { clearTimeout(timer); try { unlinkSync(dest); } catch {} reject(e); });
-    }).on('error', (e) => { clearTimeout(timer); try { unlinkSync(dest); } catch {} reject(e); });
-  });
+function robocopy(src: string, dst: string) {
+  execSync(`robocopy "${src}" "${dst}" /E /NFL /NDL /NJH /NJS /nc /ns /np`, { timeout: 300_000, stdio: 'pipe' });
 }
 
-function extractZip(zipPath: string, destDir: string): boolean {
-  try {
-    ensureDir(destDir);
-    execSync(`powershell -Command "Expand-Archive -Path '${zipPath}' -DestinationPath '${destDir}' -Force"`, {
-      encoding: 'utf-8', timeout: 120_000, stdio: 'pipe',
-    });
-    return true;
-  } catch { return false; }
+function fixPvenvCfg(venvDir: string, pythonHome: string) {
+  const cfgPath = join(venvDir, 'pyvenv.cfg');
+  if (!existsSync(cfgPath)) return;
+  let content = readFileSync(cfgPath, 'utf-8');
+  content = content.replace(/^home\s*=\s*.*$/m, `home = ${pythonHome}`);
+  writeFileSync(cfgPath, content, 'utf-8');
 }
 
-function findSingleDir(root: string): string | null {
-  const entries = readdirSync(root, { withFileTypes: true });
-  const dirs = entries.filter(e => e.isDirectory());
-  if (dirs.length === 1) return resolve(root, dirs[0].name);
-  return null;
-}
-
-async function ensureUv(): Promise<boolean> {
-  if (existsSync(UV_EXE)) { ok('uv 已就绪 (本地缓存)'); return true; }
+function setupFromVendor(vendorDir: string): boolean {
   ensureDir(BIN_DIR);
-  const zipPath = join(BIN_DIR, 'uv.zip');
-  log('下载 uv (首次 ~20MB)...');
-  try {
-    await downloadFile(UV_DOWNLOAD_URL, zipPath, 300);
-    ok('下载完成');
-    log('解压 uv...');
-    const tmpDir = join(BIN_DIR, '_uv_tmp');
-    if (!extractZip(zipPath, tmpDir)) { err('uv 解压失败'); return false; }
-    const exePath = resolve(tmpDir, 'uv.exe');
-    if (existsSync(exePath)) renameSync(exePath, UV_EXE);
-    else { err('zip 中未找到 uv.exe'); return false; }
-    rmSync(tmpDir, { recursive: true, force: true });
-    unlinkSync(zipPath);
-    ok('uv 安装完成');
-    return true;
-  } catch (e: unknown) { err(`uv 下载失败: ${e instanceof Error ? e.message : String(e)}`); return false; }
-}
-
-async function ensurePython313(): Promise<boolean> {
-  try {
-    const r = execSync(`"${UV_EXE}" python list --only-installed`, { encoding: 'utf-8', timeout: 15_000, stdio: 'pipe' });
-    if (r.includes('3.13')) { ok('Python 3.13 已就绪 (uv 管理)'); return true; }
-  } catch {}
-  log('安装 Python 3.13 (通过 uv, 首次 ~30MB)...');
-  try {
-    execSync(`"${UV_EXE}" python install 3.13`, { encoding: 'utf-8', timeout: 300_000, stdio: 'pipe' });
-    ok('Python 3.13 安装完成');
-    return true;
-  } catch (e: unknown) { err(`Python 安装失败: ${e instanceof Error ? e.message : String(e)}`); return false; }
-}
-
-async function ensureWindowsMcp(): Promise<boolean> {
-  if (existsSync(join(MCP_DIR, 'pyproject.toml')) && existsSync(join(MCP_DIR, 'src'))) {
-    ok('Windows-MCP 已就绪 (本地缓存)');
-    log('检查更新...');
-    try {
-      const r = execSync(`"${UV_EXE}" sync`, { cwd: MCP_DIR, encoding: 'utf-8', timeout: 120_000, stdio: 'pipe' });
-      ok('依赖已同步');
-    } catch { warn('依赖同步失败，继续使用缓存版本'); }
-    return true;
-  }
   ensureDir(join(DEEPER_HOME, 'mcp_servers'));
-  const zipPath = join(DEEPER_HOME, 'mcp_servers', '_wmcp.zip');
-  log('下载 Windows-MCP (首次 ~5MB)...');
-  try {
-    await downloadFile(MCP_ZIP_URL, zipPath, 300);
-    ok('下载完成');
-    log('解压 Windows-MCP...');
-    const tmpDir = join(DEEPER_HOME, 'mcp_servers', '_wmcp_tmp');
-    if (!extractZip(zipPath, tmpDir)) { err('解压失败'); return false; }
-    const innerDir = findSingleDir(tmpDir);
-    if (!innerDir) { err('解压后目录结构异常'); return false; }
-    if (existsSync(MCP_DIR)) rmSync(MCP_DIR, { recursive: true, force: true });
-    renameSync(innerDir, MCP_DIR);
-    rmSync(tmpDir, { recursive: true, force: true });
-    unlinkSync(zipPath);
-    ok('解压完成');
+  ensureDir(PY_DIR);
 
-    log('安装 Python 依赖...');
-    try {
-      execSync(`"${UV_EXE}" sync`, { cwd: MCP_DIR, encoding: 'utf-8', timeout: 300_000, stdio: 'pipe' });
-      ok('依赖安装完成');
-    } catch (e: unknown) {
-      err(`依赖安装失败: ${e instanceof Error ? e.message : String(e)}`);
-      return false;
-    }
-    return true;
-  } catch (e: unknown) { err(`Windows-MCP 下载失败: ${e instanceof Error ? e.message : String(e)}`); return false; }
+  // 1. uv.exe
+  const uvSrc = join(vendorDir, 'uv', 'uv.exe');
+  const uvDst = join(BIN_DIR, 'uv.exe');
+  if (!existsSync(uvDst)) {
+    log('安装 uv...');
+    copyFileSync(uvSrc, uvDst);
+    ok('uv 已安装');
+  } else {
+    ok('uv 已就绪');
+  }
+
+  // 2. Python 3.13
+  const pySrc = join(vendorDir, 'python313');
+  if (!existsSync(join(PY_DIR, 'python.exe'))) {
+    log('安装 Python 3.13...');
+    robocopy(pySrc, PY_DIR);
+    ok('Python 3.13 已安装');
+  } else {
+    ok('Python 3.13 已就绪');
+  }
+
+  // 3. Windows-MCP (source + .venv)
+  const mcpSrc = join(vendorDir, 'windows-mcp');
+  if (!existsSync(join(MCP_DIR, 'pyproject.toml'))) {
+    log('安装 Windows-MCP...');
+    robocopy(mcpSrc, MCP_DIR);
+    ok('Windows-MCP 已安装');
+  } else {
+    ok('Windows-MCP 已就绪');
+  }
+
+  // Fix .venv/pyvenv.cfg to point to the installed Python
+  const venvDir = join(MCP_DIR, '.venv');
+  if (existsSync(join(venvDir, 'pyvenv.cfg'))) {
+    fixPvenvCfg(venvDir, PY_DIR);
+  }
+
+  return true;
 }
 
 function registerMcpServer(): void {
@@ -136,7 +90,7 @@ function registerMcpServer(): void {
   const existing = servers.findIndex((s: MCPConfigEntry) => s.name === SERVER_NAME);
   const entry: MCPConfigEntry = {
     name: SERVER_NAME,
-    command: UV_EXE,
+    command: join(BIN_DIR, 'uv.exe'),
     args: ['run', 'windows-mcp'],
     cwd: MCP_DIR,
     enabled: true,
@@ -152,8 +106,8 @@ export async function cmcCommand(): Promise<void> {
   console.log();
   console.log('  ┌───────────────────────────────────────────────┐');
   console.log('  │   🖥️  Windows-MCP 电脑控制模式                │');
-  console.log('  │   首次启动需下载组件 · 之后纯离线运行          │');
   console.log('  │   AI 将能直接操控你的 Windows 桌面             │');
+  console.log('  │   预置依赖 · 离线可用 · 无需网络               │');
   console.log('  └───────────────────────────────────────────────┘');
   console.log();
 
@@ -162,21 +116,18 @@ export async function cmcCommand(): Promise<void> {
     process.exit(1);
   }
 
-  const uvOk = await ensureUv();
-  if (!uvOk) process.exit(1);
+  const vendorDir = getVendorDir();
+  if (!vendorDir) {
+    err('未找到内置依赖包。请重新安装: npm install -g deeper-cli@latest');
+    process.exit(1);
+  }
 
-  const pyOk = await ensurePython313();
-  if (!pyOk) process.exit(1);
-
-  const mcpOk = await ensureWindowsMcp();
-  if (!mcpOk) process.exit(1);
+  if (!setupFromVendor(vendorDir)) process.exit(1);
 
   registerMcpServer();
 
   console.log();
   ok('一切就绪，正在启动电脑控制模式...');
-  console.log();
-  console.log('  📌 之后使用 `deeper cmc` 即可直接进入，无需再次下载');
   console.log();
 
   const { chat } = await import('./chat.js');
