@@ -83,6 +83,13 @@ async function main() {
       break;
     }
 
+    case 'cmc':
+    case 'controlmycomputer': {
+      const { cmcCommand } = await import('./commands/cmc.ts');
+      await cmcCommand();
+      break;
+    }
+
     case 'version': {
       console.log(`DeeperCode v${DEEPER_VERSION}`);
       break;
@@ -136,6 +143,8 @@ DeeperCode v${DEEPER_VERSION} - 一句话生成完整项目的 AI Agentic CLI �
   deeper config <subcommand>       配置管理
   deeper skill <subcommand>        Skill 管理
   deeper mcp <subcommand>          MCP 管理
+  deeper cmc                            电脑控制模式 (Windows-MCP)
+  deeper controlmycomputer               同上
 
 选项:
   -h, --help            显示帮助信息
@@ -170,6 +179,7 @@ DeeperCode v${DEEPER_VERSION} - 一句话生成完整项目的 AI Agentic CLI �
 示例:
   deeper                             启动交互式 REPL
   deeper run "创建一个 React 应用"    单次执行
+  deeper cmc                        启动电脑控制模式 (AI 操控桌面)
   deeper --model deepseek-v4-pro -k sk-xxxx  指定模型和密钥
   deeper --model deepseek-v4-flash             使用快速模型
   deeper config set theme light      切换亮色主题

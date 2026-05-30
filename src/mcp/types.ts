@@ -8,6 +8,7 @@ export interface MCPServerConfig {
   url?: string;
   headers?: Record<string, string>;
   env?: Record<string, string>;
+  cwd?: string;
 }
 
 export interface MCPTool {

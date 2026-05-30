@@ -23,6 +23,7 @@ export class StdioTransport implements MCPTransport {
       stdio: ['pipe', 'pipe', 'pipe'],
       env,
       shell: true,
+      cwd: config.cwd,
     });
 
     const rl = createInterface({ input: this.process.stdout! });

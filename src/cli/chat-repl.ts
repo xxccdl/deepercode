@@ -258,12 +258,13 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
     for (const srv of servers) {
       if (!srv.enabled || !srv.autoConnect) continue;
       try {
-        const mcpConfig: { name: string; type: 'stdio' | 'sse'; command?: string; args?: string[]; url?: string; env?: Record<string, string> } = {
+        const mcpConfig: { name: string; type: 'stdio' | 'sse'; command?: string; args?: string[]; url?: string; env?: Record<string, string>; cwd?: string } = {
           name: srv.name,
           type: srv.url ? 'sse' : 'stdio',
         };
         if (srv.command) { mcpConfig.command = srv.command; mcpConfig.args = srv.args; }
         if (srv.url) mcpConfig.url = srv.url;
+        if (srv.cwd) mcpConfig.cwd = srv.cwd;
         await mcpClient.connect(mcpConfig);
         mcpCount++;
       } catch (e: unknown) {

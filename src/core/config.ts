@@ -8,6 +8,7 @@ export interface MCPConfigEntry {
   command?: string;
   args?: string[];
   url?: string;
+  cwd?: string;
   enabled: boolean;
   autoConnect: boolean;
 }
