@@ -9,6 +9,8 @@ export interface MCPConfigEntry {
   args?: string[];
   url?: string;
   cwd?: string;
+  env?: Record<string, string>;
+  shell?: boolean;
   enabled: boolean;
   autoConnect: boolean;
 }
@@ -23,6 +25,7 @@ export interface SkillConfigEntry {
 export interface DeeperConfig {
   model: string;
   apiKey: string;
+  siliconflowApiKey: string;
   baseUrl: string;
   temperature: number;
   maxTokens: number;
@@ -44,6 +47,7 @@ export interface DeeperConfig {
 const DEFAULT_CONFIG: DeeperConfig = {
   model: DEEPSEEK_DEFAULT_MODEL,
   apiKey: process.env.DEEPSEEK_API_KEY || '',
+  siliconflowApiKey: process.env.SILICONFLOW_API_KEY || '',
   baseUrl: DEEPSEEK_BASE_URL,
   temperature: 0.7,
   maxTokens: 8192,
@@ -155,6 +159,7 @@ export class ConfigManager {
     const envMap: Record<string, keyof DeeperConfig> = {
       DEEPER_MODEL: 'model',
       DEEPER_API_KEY: 'apiKey',
+      SILICONFLOW_API_KEY: 'siliconflowApiKey',
       DEEPER_BASE_URL: 'baseUrl',
       DEEPER_TEMPERATURE: 'temperature',
       DEEPER_MAX_TOKENS: 'maxTokens',
@@ -191,6 +196,8 @@ let cachedConfig: DeeperConfig | null = null;
 const KEY_ALIASES: Record<string, keyof DeeperConfig> = {
   api_key: 'apiKey',
   'api-key': 'apiKey',
+  siliconflow_api_key: 'siliconflowApiKey',
+  'siliconflow-api-key': 'siliconflowApiKey',
   base_url: 'baseUrl',
   'base-url': 'baseUrl',
   max_tokens: 'maxTokens',
@@ -272,7 +279,12 @@ export function setConfigValue<K extends keyof DeeperConfig>(key: K, value: Deep
 }
 
 export function getApiKey(): string {
-  return getConfig().apiKey || process.env.DEEPSEEK_API_KEY || '';
+  const config = getConfig();
+  const model = config.model;
+  if (model.includes('/') || model.includes('GLM')) {
+    return config.siliconflowApiKey || process.env.SILICONFLOW_API_KEY || config.apiKey || process.env.DEEPSEEK_API_KEY || '';
+  }
+  return config.apiKey || process.env.DEEPSEEK_API_KEY || config.siliconflowApiKey || process.env.SILICONFLOW_API_KEY || '';
 }
 
 export function getModel(): string {

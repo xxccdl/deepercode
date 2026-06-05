@@ -1,11 +1,16 @@
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { ChatMessage, DeepSeekConfig, StreamChunk } from './types.js';
-import type { ToolDefinition } from '../tools/tool-types.js';
+import type { ToolDefinition, ToolCall } from '../tools/tool-types.js';
 import { RetryManager } from './RetryManager.js';
 import { StreamHandler } from './StreamHandler.js';
 import { DEEPER_HOME } from '../core/constants.js';
 import { logger } from '../core/logger.js';
+
+export interface MemoryHooks {
+  injectMemories?: (messages: ChatMessage[], lastUserQuery: string) => ChatMessage[];
+  learnFromInteraction?: (userQuery: string, assistantContent: string, toolCalls: ToolCall[]) => void;
+}
 
 interface ChatCompletionRequest {
   model: string;
@@ -30,6 +35,24 @@ function reorderMsgFields(msg: Record<string, unknown>, name: string): Record<st
   return ordered;
 }
 
+function sanitizeContent(raw: string): string {
+  return raw
+    .replace(/\u0000/g, '')
+    .replace(/[\u0001-\u0008]/g, '')
+    .replace(/[\u000B\u000C\u000E-\u001F]/g, '')
+    .replace(/\\x/g, '\\\\x')
+    .replace(/\\u/g, '\\\\u');
+}
+
+function safeJsonStringify(obj: unknown): string {
+  return JSON.stringify(obj, (_key, value) => {
+    if (typeof value === 'string') {
+      return sanitizeContent(value);
+    }
+    return value;
+  });
+}
+
 const isRetryable = (error: Error): boolean => {
   const msg = error.message.toLowerCase();
   if (msg.includes('abort')) return false;
@@ -42,19 +65,36 @@ const isRetryable = (error: Error): boolean => {
 export class DeepSeekClient {
   private config: DeepSeekConfig;
   private retryManager: RetryManager;
+  private memoryHooks: MemoryHooks;
 
-  constructor(config: DeepSeekConfig) {
+  constructor(config: DeepSeekConfig, memoryHooks?: MemoryHooks) {
     this.config = config;
     this.retryManager = new RetryManager(MAX_RETRIES);
+    this.memoryHooks = memoryHooks || {};
   }
 
   async chatStream(
     messages: ChatMessage[],
     tools?: ToolDefinition[],
     overrides?: Partial<DeepSeekConfig>,
+    memoryQuery?: string,
   ): Promise<AsyncIterable<StreamChunk>> {
     const cfg = this.mergeConfig(overrides);
-    const body = this.buildRequestBody(messages, tools, cfg, true);
+    let enhancedMessages = messages;
+    let lastUserQuery = '';
+
+    if (memoryQuery && this.memoryHooks.injectMemories) {
+      for (let i = messages.length - 1; i >= 0; i--) {
+        if (messages[i].role === 'user' && messages[i].content) {
+          lastUserQuery = messages[i].content ?? '';
+          break;
+        }
+      }
+      if (!lastUserQuery) lastUserQuery = memoryQuery;
+      enhancedMessages = this.memoryHooks.injectMemories([...messages], lastUserQuery);
+    }
+
+    const body = this.buildRequestBody(enhancedMessages, tools, cfg, true);
 
     const response = await this.retryManager.execute(async () => {
       return this.retryManager.withTimeout(
@@ -68,8 +108,36 @@ export class DeepSeekClient {
       throw new Error('Response body is empty');
     }
 
-    return this.createStreamIterable(response.body);
+    const streamIter = this.createStreamIterable(response.body);
+    const hooks = this.memoryHooks;
+    let assistantContent = '';
+    const capturedToolCalls: ToolCall[] = [];
+    let isDone = false;
+
+    async function* wrapStream(): AsyncIterable<StreamChunk> {
+      for await (const chunk of streamIter) {
+        if (chunk.type === 'text' && chunk.content) {
+          assistantContent += chunk.content;
+        }
+        if (chunk.type === 'tool_call_end') {
+          const tc = (chunk as any).tool_call as ToolCall;
+          if (tc) capturedToolCalls.push(tc);
+        }
+        if (chunk.type === 'done') {
+          isDone = true;
+        }
+        yield chunk;
+      }
+      if (isDone && hooks.learnFromInteraction && lastUserQuery && (assistantContent || capturedToolCalls.length > 0)) {
+        try { hooks.learnFromInteraction(lastUserQuery, assistantContent, capturedToolCalls); } catch {}
+      }
+    }
+
+    return wrapStream();
   }
+
+  getMemoryHooks(): MemoryHooks { return this.memoryHooks; }
+  setMemoryHooks(hooks: MemoryHooks): void { this.memoryHooks = hooks; }
 
   private async *createStreamIterable(body: unknown): AsyncIterable<StreamChunk> {
     const handler = new StreamHandler();
@@ -150,7 +218,7 @@ export class DeepSeekClient {
             if (typeof fn.arguments === 'string') {
               args = fn.arguments;
             } else if (fn.arguments && typeof fn.arguments === 'object') {
-              args = JSON.stringify(fn.arguments);
+              args = safeJsonStringify(fn.arguments);
             } else {
               args = '{}';
             }
@@ -196,7 +264,7 @@ export class DeepSeekClient {
       body.tool_choice = 'auto';
     }
 
-    let raw = JSON.stringify(body);
+    let raw = safeJsonStringify(body);
     let parsed: Record<string, unknown>;
     try {
       parsed = JSON.parse(raw);
@@ -255,7 +323,7 @@ export class DeepSeekClient {
 
     if (!response.ok) {
       const errorBody = await response.text().catch(() => '');
-      logger.error('DeepSeek API error', {
+      logger.error('API error', {
         status: response.status,
         statusText: response.statusText,
         body: errorBody.slice(0, 500),

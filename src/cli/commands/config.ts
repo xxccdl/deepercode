@@ -15,6 +15,7 @@ export async function configCommand(args: string[]): Promise<void> {
         { key: 'model', value: config.model },
         { key: 'baseUrl', value: config.baseUrl },
         { key: 'apiKey', value: config.apiKey || '', mask: true },
+        { key: 'siliconflowApiKey', value: config.siliconflowApiKey || '', mask: true },
         { key: 'maxTokens', value: config.maxTokens },
         { key: 'thinkBudget', value: config.thinkBudget },
         { key: 'thinkEnabled', value: config.thinkEnabled },
@@ -44,6 +45,7 @@ export async function configCommand(args: string[]): Promise<void> {
       }
       const KEY_ALIASES: Record<string, string> = {
         api_key: 'apiKey', 'api-key': 'apiKey', apikey: 'apiKey', key: 'apiKey',
+        siliconflow_api_key: 'siliconflowApiKey', 'siliconflow-api-key': 'siliconflowApiKey',
       };
       const key = KEY_ALIASES[rawKey.toLowerCase()] || rawKey;
       const config = getConfig();
@@ -80,6 +82,7 @@ export async function configCommand(args: string[]): Promise<void> {
         timeout_ms: 'timeoutMs', 'timeout-ms': 'timeoutMs',
         max_sub_agents: 'maxSubAgents', 'max-sub-agents': 'maxSubAgents',
         max_recursion_depth: 'maxRecursionDepth', 'max-recursion-depth': 'maxRecursionDepth',
+        siliconflow_api_key: 'siliconflowApiKey', 'siliconflow-api-key': 'siliconflowApiKey',
       };
       const key = KEY_ALIASES[rawKey.toLowerCase()] || rawKey;
 

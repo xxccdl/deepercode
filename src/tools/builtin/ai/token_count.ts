@@ -1,17 +1,5 @@
 import type { Tool } from '../../tool-types.js';
 
-/**
- * DeepSeek-V3/V4 token estimator.
- *
- * DeepSeek uses a BPE tokenizer. Approximation:
- * - CJK chars (中文/日文/韩文): ~1.6 tokens each
- * - English words (common): ~1.3 tokens each
- * - Code / symbol-heavy: ~1 token per 2.5 chars
- * - Digits: ~1 token per 3 chars
- * - Newlines: ~1 token each
- * - Leading whitespace: ~1 token
- */
-
 const CJK_RE = /[\u4e00-\u9fff\u3400-\u4dbf\u{20000}-\u{2a6df}\u{2a700}-\u{2b73f}\u{2b740}-\u{2b81f}\u{2b820}-\u{2ceaf}\u{f900}-\u{faff}\u{2f800}-\u{2fa1f}]/gu;
 const HANGUL_RE = /[\uac00-\ud7af]/g;
 const JAPANESE_RE = /[\u3040-\u309f\u30a0-\u30ff]/g;
@@ -21,42 +9,32 @@ export function estimateTokens(text: string): number {
   if (!text) return 0;
 
   let tokens = 0;
-  let remaining = text;
 
-  // Count CJK characters (Chinese)
-  const cjk = remaining.match(CJK_RE);
+  const cjk = text.match(CJK_RE);
   if (cjk) tokens += Math.ceil(cjk.length * 1.6);
 
-  // Count Korean Hangul
-  const hangul = remaining.match(HANGUL_RE);
+  const hangul = text.match(HANGUL_RE);
   if (hangul) tokens += Math.ceil(hangul.length * 1.5);
 
-  // Count Japanese kana
-  const jp = remaining.match(JAPANESE_RE);
+  const jp = text.match(JAPANESE_RE);
   if (jp) tokens += Math.ceil(jp.length * 1.4);
 
-  // Count CJK punctuation
-  const cjkp = remaining.match(CJK_PUNCT_RE);
+  const cjkp = text.match(CJK_PUNCT_RE);
   if (cjkp) tokens += cjkp.length;
 
-  // Remove all CJK-related chars to process ASCII portion
-  let ascii = remaining;
+  let ascii = text;
   ascii = ascii.replace(CJK_RE, '');
   ascii = ascii.replace(HANGUL_RE, '');
   ascii = ascii.replace(JAPANESE_RE, '');
   ascii = ascii.replace(CJK_PUNCT_RE, '');
 
-  // Count newlines
   const nls = ascii.split('\n').length - 1;
   tokens += nls;
 
-  // Count each line's content separately (better word-boundary handling)
   const lines = ascii.split('\n');
   for (const line of lines) {
     if (!line.trim()) { tokens += 1; continue; }
 
-    // Split into segments: code/symbols vs words
-    // Code-like: contains lots of symbols
     const symbols = (line.match(/[{}()\[\];:'"`,.<>\/\\|&^~`@#$%*+=\-!?]/g) || []).length;
     const digits = (line.match(/\d+/g) || []).join('').length;
     const words = line.match(/[a-zA-Z_]+/g) || [];
@@ -66,66 +44,107 @@ export function estimateTokens(text: string): number {
       return s + Math.ceil(w.length / 3.5);
     }, 0);
 
-    // Whitespace and punctuation within words are usually part of the token
     const digitTokens = Math.ceil(digits / 3);
     const symbolTokens = Math.ceil(symbols / 1.8);
 
     tokens += wordTokens + digitTokens + symbolTokens;
   }
 
-  // Floor + 10% safety margin for BPE overhead
   return Math.max(1, Math.floor(tokens * 1.1));
 }
 
-/**
- * Estimate tokens for an array of chat messages (DeepSeek API format).
- * Includes counting tool definitions.
- */
-export function estimateMessageTokens(
+export interface ContextBreakdown {
+  total: number;
+  systemTokens: number;
+  historyTokens: number;
+  toolTokens: number;
+  xmemoryTokens: number;
+  deeperMdTokens: number;
+  rulesTokens: number;
+  percentUsed: number;
+  historyCount: number;
+  memoryCount: number;
+}
+
+let cachedBreakdown: ContextBreakdown | null = null;
+let cachedBreakdownMs = 0;
+
+export function estimateContextBreakdown(
   messages: Array<Record<string, unknown>>,
   tools?: Array<{ type: string; function: { name: string; description: string; parameters: Record<string, unknown> } }>,
-): number {
-  let total = 0;
+  overrides?: { xmemoryTokens?: number; deeperMdTokens?: number; rulesTokens?: number; memoryCount?: number; historyCount?: number },
+): ContextBreakdown {
+  const now = Date.now();
+  if (cachedBreakdown && (now - cachedBreakdownMs) < 200) return cachedBreakdown;
 
-  // System overhead (~8 tokens per DeepSeek's API format)
-  total += 8;
+  let total = 8;
+  let systemTokens = 8;
+  let historyTokens = 0;
 
   for (const msg of messages) {
-    // Role overhead
     total += 3;
-
     const content = msg.content as string | null | undefined;
-    if (content) total += estimateTokens(content);
+    if (content) {
+      const ct = estimateTokens(content);
+      if (msg.role === 'system') systemTokens += ct;
+      else historyTokens += ct;
+      total += ct;
+    }
 
     const toolCalls = msg.tool_calls as Array<{ function?: { name?: string; arguments?: string } }> | undefined;
     if (toolCalls) {
       for (const tc of toolCalls) {
-        total += estimateTokens(tc.function?.name || '');
-        total += estimateTokens(tc.function?.arguments || '');
-        total += 4; // JSON structure overhead per tool call
+        const tct = estimateTokens(tc.function?.name || '') + estimateTokens(tc.function?.arguments || '') + 4;
+        historyTokens += tct;
+        total += tct;
       }
     }
 
     const toolCallId = msg.tool_call_id as string | undefined;
-    if (toolCallId) total += estimateTokens(toolCallId) + 2;
+    if (toolCallId) { total += estimateTokens(toolCallId) + 2; historyTokens += estimateTokens(toolCallId) + 2; }
   }
 
-  // Tool definitions
+  let toolTokens = 0;
   if (tools) {
     for (const t of tools) {
-      total += estimateTokens(t.function.name);
-      total += estimateTokens(t.function.description);
-      total += estimateTokens(JSON.stringify(t.function.parameters));
-      total += 4; // JSON structure overhead per tool def
+      const tt = estimateTokens(t.function.name) + estimateTokens(t.function.description) + estimateTokens(JSON.stringify(t.function.parameters)) + 4;
+      toolTokens += tt;
+      total += tt;
     }
   }
 
-  return total;
+  const xmTok = overrides?.xmemoryTokens ?? 0;
+  const dmTok = overrides?.deeperMdTokens ?? 0;
+  const rTok = overrides?.rulesTokens ?? 0;
+  total += xmTok + dmTok + rTok;
+  systemTokens += xmTok + dmTok + rTok;
+
+  cachedBreakdown = {
+    total,
+    systemTokens,
+    historyTokens,
+    toolTokens,
+    xmemoryTokens: xmTok,
+    deeperMdTokens: dmTok,
+    rulesTokens: rTok,
+    percentUsed: 0,
+    historyCount: overrides?.historyCount ?? 0,
+    memoryCount: overrides?.memoryCount ?? 0,
+  };
+  cachedBreakdownMs = now;
+  return cachedBreakdown;
+}
+
+export function estimateMessageTokens(
+  messages: Array<Record<string, unknown>>,
+  tools?: Array<{ type: string; function: { name: string; description: string; parameters: Record<string, unknown> } }>,
+): number {
+  return estimateContextBreakdown(messages, tools).total;
 }
 
 export const token_count: Tool = {
   name: 'token_count',
-  description: '计算文本/文件/对话的 Token 数量 (DeepSeek-V3/V4 BPE 估算)。支持统计中文、英文、代码的 Token 消耗。',
+  description: '计算文本/文件/对话的 Token 数量 (BPE 估算)。支持统计中文、英文、代码的 Token 消耗。',
   category: 'ai',
   parameters: {
     type: 'object',
@@ -180,7 +199,7 @@ export const token_count: Tool = {
       }
 
       const output = [
-        `Token 估算 (DeepSeek BPE):`,
+        `Token 估算 (BPE):`,
         `总 Token: ${tokens.toLocaleString()}`,
         `字符数:   ${chars.toLocaleString()}`,
         `单词数:   ${words.toLocaleString()}  ${hasCJK ? '(含中文)' : ''}`,

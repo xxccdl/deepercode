@@ -1,5 +1,6 @@
 import { render } from 'ink';
 import { App } from '../../ui/App.tsx';
+import { getModelBaseUrl } from '../../core/constants.js';
 import { bootstrap } from '../bootstrap.ts';
 
 interface ChatOptions {

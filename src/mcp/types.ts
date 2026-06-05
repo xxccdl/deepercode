@@ -9,6 +9,7 @@ export interface MCPServerConfig {
   headers?: Record<string, string>;
   env?: Record<string, string>;
   cwd?: string;
+  shell?: boolean;
 }
 
 export interface MCPTool {

@@ -3,17 +3,17 @@ import process from 'node:process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, copyFileSync, unlinkSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { execSync } from 'node:child_process';
-import { DEEPER_HOME } from '../core/constants.js';
+import { DEEPER_HOME, ALL_MODELS, getModelBaseUrl } from '../core/constants.js';
 import { TOOL_SAFETY_MAP } from '../tools/tool-types.js';
 import type { Tool } from '../tools/tool-types.js';
 import { ToolValidator } from '../tools/ToolValidator.js';
 import { xmemory, setSessionId } from '../memory/xmemory.js';
 import { MarkdownStreamRenderer } from '../ui/markdown.js';
 import { getTodos, todoSummary } from '../tools/builtin/ai/todo_manager.js';
-import { estimateMessageTokens } from '../tools/builtin/ai/token_count.js';
+import { estimateMessageTokens, estimateTokens, estimateContextBreakdown, type ContextBreakdown } from '../tools/builtin/ai/token_count.js';
 import { SkillEngine } from '../skills/SkillEngine.js';
 import { MCPClient } from '../mcp/MCPClient.js';
-import { DeepSeekClient } from '../model/DeepSeekClient.js';
+import { DeepSeekClient, type MemoryHooks } from '../model/DeepSeekClient.js';
 import type { ChatMessage, StreamChunk } from '../model/types.js';
 import { O, Oflush, A, d, b, c, g, y, r, B, G, resetTimer, thinkingAnim, thinkingAnimAt } from '../ui/ansi.js';
 
@@ -258,13 +258,15 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
     for (const srv of servers) {
       if (!srv.enabled || !srv.autoConnect) continue;
       try {
-        const mcpConfig: { name: string; type: 'stdio' | 'sse'; command?: string; args?: string[]; url?: string; env?: Record<string, string>; cwd?: string } = {
+        const mcpConfig: { name: string; type: 'stdio' | 'sse'; command?: string; args?: string[]; url?: string; env?: Record<string, string>; cwd?: string; shell?: boolean } = {
           name: srv.name,
           type: srv.url ? 'sse' : 'stdio',
         };
         if (srv.command) { mcpConfig.command = srv.command; mcpConfig.args = srv.args; }
         if (srv.url) mcpConfig.url = srv.url;
         if (srv.cwd) mcpConfig.cwd = srv.cwd;
+        if (srv.env) mcpConfig.env = srv.env;
+        if (srv.shell !== undefined) mcpConfig.shell = srv.shell;
         await mcpClient.connect(mcpConfig);
         mcpCount++;
       } catch (e: unknown) {
@@ -440,8 +442,19 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
       if (cmd === '/stats') { O(B(`▸ API:${GS.api} 工具:${GS.tc} 字符:${GS.ch}`) + '\n\n'); continue; }
       if (cmd === '/memory') { await showMemory(); continue; }
       if (cmd === '/tasks') { await showTasks(); continue; }
-      if (cmd === '/model') { O(c('模型: deepseek-v4-pro | deepseek-v4-flash\n  deeper config set model <name>\n\n')); continue; }
-      if (cmd === '/config') { O(c('配置: deeper config list | deeper config set <key> <value>\n\n')); continue; }
+      if (cmd === '/model') {
+        const cur = (opts.model || 'deepseek-v4-pro');
+        O(G('  📋 可用模型:\n'));
+        for (const m of ALL_MODELS) {
+          const mark = m.id === cur ? ' ' + A.c + '▶' + A.R : '  ';
+          O(`${mark} ${c(m.id)} ${A.d}${m.provider}${A.R} · ${m.description}\n`);
+        }
+        O(`\n  ${c('切换: deeper config set model <模型ID>')}\n`);
+        O(`  ${c('Key:  deeper config set api_key <key>            ← DeepSeek')}\n`);
+        O(`  ${c('      deeper config set siliconflow_api_key <key> ← SiliconFlow')}\n\n`);
+        continue;
+      }
+      if (cmd === '/config') { O(c('配置: deeper config list | deeper config set <key> <value>\n  api_key · siliconflow_api_key · model · base_url · temperature\n\n')); continue; }
       if (cmd === '/cwd') { O(G(`  ${process.cwd()}\n\n`)); continue; }
       if (cmd === '/export') { await exportHistory(history); continue; }
       if (cmd === '/delete' || cmd === '/rm') {
@@ -482,10 +495,12 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
         await runLoop(opts, history, tools, idefs, confirm);
         continue;
       }
-      if (cmd === '/compact') { compressHistory(history); O(g('  ✓ 已压缩上下文') + G(` (保留 ${history.length} 条)`) + '\n\n'); continue; }
+      if (cmd === '/compact') { compressHistory(history); const ct = estimateMessageTokens(buildMsgs(history).map(m => ({ role: m.role, content: m.content, tool_calls: m.tool_calls as any, tool_call_id: m.tool_call_id as string }))); O(g('  ✓ 已压缩') + G(` · ${history.length}条 · 节省~${(compressTokSaved / 1000).toFixed(0)}k tokens`) + '\n\n'); continue; }
       if (cmd === '/status') {
         const msgs = buildMsgs(history);
         const ctxTokens = estimateMessageTokens(msgs, toolDefs.map(t => ({ type: 'function', function: { name: t.function.name, description: t.function.description, parameters: t.function.parameters } })));
+        const breakdown = estimateContextBreakdown(msgs, toolDefs.map(t => ({ type: 'function', function: { name: t.function.name, description: t.function.description, parameters: t.function.parameters } })), { memoryCount: xmemory.totalEntries });
+
         const ctxPct = ((ctxTokens / CONTEXT_LIMIT) * 100).toFixed(1);
         const pct = ctxTokens / CONTEXT_LIMIT;
         const width = 16;
@@ -493,13 +508,58 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
         const bar = '█'.repeat(Math.min(filled, width)) + '░'.repeat(Math.max(width - filled, 0));
         const barColor = pct > 0.85 ? y(bar) : pct > 0.6 ? A.m + bar + A.R : G(bar);
         O(b(c('  Status')) + '\n');
-        O(G(`  API: ${GS.api} · 工具: ${GS.tc} · 字符: ${GS.ch}`) + '\n');
-        O(G(`  上下文: `) + barColor + G(` ${ctxPct}% · ${history.length} 条消息`) + '\n');
+        O(G(`  API: ${GS.api} · 工具: ${GS.tc} · 字符: ${(GS.ch / 1000).toFixed(0)}k`) + '\n');
+        O(G(`  上下文: `) + barColor + G(` ${ctxPct}%`));
+        O(G(` · ${history.length}条消息 · ${breakdown.total.toLocaleString()} tokens`) + '\n');
+        if (compressCount > 0) O(G(`  压缩: ${compressCount}次 · 节省 ~${(compressTokSaved / 1000).toFixed(0)}k tokens`) + '\n');
+
+        const memStats = xmemory.getStats();
+        if (memStats.totalEntries > 0) {
+          const memLine = [
+            memStats.workingTokens > 0 ? G(`工作${(memStats.workingTokens / 1000).toFixed(1)}k`) : '',
+            memStats.semanticTokens > 0 ? G(`知识${(memStats.semanticTokens / 1000).toFixed(1)}k`) : '',
+            memStats.proceduralTokens > 0 ? G(`技能${(memStats.proceduralTokens / 1000).toFixed(1)}k`) : '',
+            memStats.episodicTokens > 0 ? G(`经历${(memStats.episodicTokens / 1000).toFixed(1)}k`) : '',
+          ].filter(Boolean).join(' · ') || '无';
+          O(G(`  记忆: ${memStats.totalEntries}条 · ${memLine}`) + '\n');
+        }
+
+        if (breakdown.historyTokens > 0 || breakdown.toolTokens > 0) {
+          const parts: string[] = [];
+          parts.push(G(`对话${(breakdown.historyTokens / 1000).toFixed(1)}k`));
+          parts.push(G(`工具${(breakdown.toolTokens / 1000).toFixed(1)}k`));
+          if (breakdown.xmemoryTokens > 0) parts.push(G(`记忆${(breakdown.xmemoryTokens / 1000).toFixed(1)}k`));
+          O(G(`  明细: ${parts.join(' · ')}`) + '\n');
+        }
+
         const todos = getTodos();
         if (todos.length > 0) {
           const active = todos.filter(t => t.status === 'in_progress').length;
           const pending = todos.filter(t => t.status === 'pending').length;
           O(G(`  任务: ${active} 进行中 · ${pending} 待办 · ${todos.length} 总计`) + '\n');
+        }
+
+        const prefs = xmemory.getPreferences();
+        if (prefs.length > 0) {
+          const topPrefs = prefs.slice(0, 3).map(p => `${p.key}=${p.value}`).join(', ');
+          O(G(`  偏好: ${topPrefs} · 共${prefs.length}条`) + '\n');
+        }
+        const pats = xmemory.getPatterns();
+        if (pats.length > 0) {
+          const topPats = pats.slice(0, 2).map(p => `${p.description.slice(0, 30)} (${p.frequency}次)`).join(' · ');
+          O(G(`  模式: ${topPats} · 共${pats.length}个`) + '\n');
+        }
+        O('\n'); continue;
+      }
+      if (cmd === '/skills') {
+        if (!skillEngine) { O(y('  Skills 未初始化\n\n')); continue; }
+        const skills = skillEngine.list();
+        if (!skills.length) { O(G('  暂无 Skills\n  使用 AI 工具 skill_create 创建\n\n')); continue; }
+        O(b(c('  Skills')) + G(` · ${skills.length} 个`) + '\n');
+        for (const s of skills) {
+          const loc = s.source === 'project' ? 'P' : 'G';
+          O(G(`  📦 ${s.name} [${loc}]`) + G(` · ${s.description.slice(0, 50)}`) + '\n');
+          if (s.triggers.length > 0) O(G(`    触发: ${s.triggers.join(', ')}`) + '\n');
         }
         O('\n'); continue;
       }
@@ -537,7 +597,7 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
       }
       if (cmd === '/help') {
         O(c('  /help /clear /quit /save [name] /load|resume [name] /sessions\n'));
-        O(c('  /tools [cat] /stats /memory /tasks /model /config /cwd /export /init /compact /mcp /rules\n'));
+        O(c('  /tools [cat] /stats /memory /skills /tasks /model /config /cwd /export /init /compact /mcp /rules\n'));
         O(c('  /plan <任务> /spec <任务> /review <路径> /fix [目标]\n'));
         O(c('  /commit /analyze [路径] /diff <文件> /undo /delete [n] /status\n\n'));
         continue;
@@ -901,7 +961,7 @@ async function runLoop(
   opts: ReplOptions, history: Message[], tools: Tool[],
   toolDefs: ToolDef[], confirm: (msg: string) => Promise<boolean>,
 ): Promise<void> {
-  let ttc = 0, ce = 0, stagnation = 0;
+  let ttc = 0, ce = 0, stagnation = 0, firstTextDone = false;
 
   for (let iter = 0; ; iter++) {
     const cols = process.stdout.columns || 80;
@@ -912,6 +972,10 @@ async function runLoop(
     if (totalCtx > CONTEXT_LIMIT * 0.7 && history.length > 10) {
       compressHistory(history);
       msgs = buildMsgs(history);
+      const afterTok = estimateMessageTokens(msgs, toolDefs.map(t => ({ type: 'function', function: { name: t.function.name, description: t.function.description, parameters: t.function.parameters } })));
+      totalCtx = afterTok;
+      const pctBefore = ((totalCtx / CONTEXT_LIMIT) * 100).toFixed(0);
+      O(y(`\n  📦 自动压缩 · 第${compressCount}次 · 上下文 ${pctBefore}%`) + '\n');
     }
 
     if (stagnation >= 5) {
@@ -956,11 +1020,12 @@ async function runLoop(
 
       for await (const chunk of stream) {
         if (chunk.type === 'text') {
+          if (showingThink) { showingThink = false; stopStreamAnim(); Oflush(); O('\r' + ' '.repeat(cols) + '\r'); }
+          if (!firstTextDone) firstTextDone = true;
           const t = chunk.content || '';
           fc += t;
           if (fc.length > 100_000) fc = fc.slice(-80_000);
           if (fc === t) {
-            if (showingThink) { showingThink = false; stopStreamAnim(); }
             stopTcSpin(); Oflush(); O('\r' + ' '.repeat(cols) + '\r');
             if (fc.length === t.length) O(b(c('●')) + ' ');
           }
@@ -969,7 +1034,7 @@ async function runLoop(
           GS.ch += t.length;
         }
         if (chunk.type === 'thinking') {
-          if (!showingThink) { showingThink = true; startStreamAnim(); }
+          if (!showingThink && !firstTextDone) { showingThink = true; startStreamAnim(); }
           th += chunk.content || '';
           if (th.length > 20_000) th = th.slice(-16_000);
         }
@@ -1025,6 +1090,13 @@ async function runLoop(
     md.reset();
 
     if (se) {
+      const isRateLimit = se.includes('429') || se.includes('rate limit') || se.includes('TPM');
+      if (isRateLimit && ce >= 1) {
+        O(r(`\n  ⛔ ${se}`));
+        O(y(`\n  API 频率限制 · 请稍后再试或切换模型 (/model 查看)`));
+        O(y(`\n  深度思考模式也会加速消耗 Token 配额\n\n`));
+        break;
+      }
       ce++; O(r(`\n  ✗ ${se}`));
       const w = Math.min(1000 * Math.min(ce, 10), 10000); O(G(`  重试(${ce}/∞)...\n`)); await new Promise(r2 => setTimeout(r2, w)); continue;
     }
@@ -1095,6 +1167,8 @@ async function runLoop(
       }
       currentAbortController = null;
 
+      tryNotifyMcpComplete(history);
+
       trimHistory(history, MAX_HISTORY); continue;
     }
 
@@ -1125,6 +1199,12 @@ async function runLoop(
       const lu = lastUser(history);
       xmemory.storeEpisodic(`完成任务: ${lu.slice(0, 100)} → ${fc.slice(0, 200)}`, ['task', 'complete'], 5);
       xmemory.storeSemantic(`学会了关于 ${lu.slice(0, 80)} 的处理方式`, ['learning'], 4);
+
+      const recentMsgs = history.filter(m => m.role === 'user').map(m => m.content || '').filter(Boolean).slice(-5);
+      const recentTools = history.filter(m => m.role === 'tool').map(m => m.content || '').filter(Boolean).slice(-10);
+      if (recentMsgs.length > 0 || recentTools.length > 0) {
+        try { xmemory.autoLearn(recentMsgs, [], recentTools); } catch {}
+      }
     }
 
     return;
@@ -1329,8 +1409,16 @@ After writing or editing code files, ALWAYS verify the changes:
     const hints = xmemory.getProceduralHints(lastU.content || '', 3);
     if (hints) sysContent += '\n' + hints;
   }
-  const workCtx = xmemory.getWorkingContext(400);
-  if (workCtx) sysContent += '\n[Recent Work]\n' + workCtx;
+
+  const userCtx = xmemory.getUserContext(2000);
+  if (userCtx) sysContent += '\n' + userCtx;
+
+  const sysContentTokens = estimateTokens(sysContent);
+  const workBudget = Math.max(300, Math.min(2000, Math.floor((CONTEXT_LIMIT * 0.15) - sysContentTokens)));
+  if (workBudget > 200) {
+    const workCtx = xmemory.getWorkingContext(workBudget);
+    if (workCtx) sysContent += '\n[Recent Work]\n' + workCtx;
+  }
 
   const skillPrompt = getSkillSystemPrompt();
   if (skillPrompt) sysContent += '\n' + skillPrompt;
@@ -1401,6 +1489,28 @@ After writing or editing code files, ALWAYS verify the changes:
   return r;
 }
 
+function tryNotifyMcpComplete(history: Message[]) {
+  if (process.platform !== 'win32') return;
+  const hasMcpTool = history.some(m => {
+    if ((m.name || '').startsWith('mcp:windows-mcp:')) return true;
+    if (m.tool_calls?.some(tc => (tc.name || '').startsWith('mcp:windows-mcp:'))) return true;
+    return false;
+  });
+  if (!hasMcpTool) return;
+  try {
+    execSync(`powershell -Command "
+      [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > \\$null
+      \\$template = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02)
+      \\$textNodes = \\$template.GetElementsByTagName('text')
+      \\$textNodes.Item(0).AppendChild(\\$template.CreateTextNode('DeeperCode')) > \\$null
+      \\$textNodes.Item(1).AppendChild(\\$template.CreateTextNode('电脑操控任务已完成')) > \\$null
+      \\$notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('DeeperCode')
+      \\$notification = [Windows.UI.Notifications.ToastNotification]::new(\\$template)
+      \\$notifier.Show(\\$notification)
+    "`, { timeout: 10_000, stdio: 'pipe' });
+  } catch { /* 通知失败不影响主流程 */ }
+}
+
 function trimHistory(h: Message[], max: number) { while (h.length > max) h.shift(); }
 
 const _fileCache = new Map<string, { mtime: number; content: string }>();
@@ -1416,11 +1526,18 @@ function cachedRead(path: string, maxLen = 4000): string | null {
   } catch { return null; }
 }
 
+let compressCount = 0;
+let compressTokSaved = 0;
+
 function compressHistory(h: Message[]): void {
   if (h.length <= 6) return;
   const keep = 6;
   const old = h.slice(0, h.length - keep);
   const recent = h.slice(h.length - keep);
+
+  const beforeTokens = estimateMessageTokens(
+    h.map(m => ({ role: m.role, content: m.content, tool_calls: m.tool_calls, tool_call_id: m.tool_call_id }))
+  );
 
   const sections: string[] = [];
   let userParts: string[] = [];
@@ -1457,10 +1574,16 @@ function compressHistory(h: Message[]): void {
   }
   flushSection();
 
-  const compressed = sections.join('\n').slice(0, 4000);
+  const compressed = sections.join('\n').slice(0, 6000);
   h.length = 0;
-  h.push({ role: 'system', content: `[上下文压缩·${old.length}条摘要]\n${compressed}` });
+  h.push({ role: 'system', content: `[上下文压缩·第${compressCount + 1}次·${old.length}条]\n${compressed}` });
   h.push(...recent);
+
+  compressCount++;
+  const afterTokens = estimateMessageTokens(
+    h.map(m => ({ role: m.role, content: m.content, tool_calls: m.tool_calls, tool_call_id: m.tool_call_id }))
+  );
+  compressTokSaved += Math.max(0, beforeTokens - afterTokens);
 }
 
 function sanitize(t: string): string {
@@ -1652,16 +1775,7 @@ async function callApi(
   opts: ReplOptions, msgs: Array<Record<string, unknown>>,
   tools: ToolDef[], cmt = 8192, signal?: AbortSignal,
 ): Promise<AsyncIterable<StreamChunk>> {
-  const client = new DeepSeekClient({
-    apiKey: opts.apiKey || '',
-    model: opts.model || 'deepseek-chat',
-    baseUrl: opts.baseUrl || 'https://api.deepseek.com',
-    temperature: opts.temperature ?? 0,
-    maxTokens: cmt,
-    think: { enabled: opts.thinkEnabled ?? true, budgetTokens: Math.min(cmt, opts.thinkBudget || 16000) },
-    signal,
-  });
-  const chatMsgs: ChatMessage[] = msgs.map(m => ({
+  const rawMsgs = msgs.map(m => ({
     role: (m.role as ChatMessage['role']) || 'user',
     content: m.content != null ? String(m.content) : null,
     tool_calls: m.tool_calls as ChatMessage['tool_calls'],
@@ -1670,8 +1784,71 @@ async function callApi(
     reasoning_content: m.reasoning_content as string | undefined,
   }));
 
-  for (let i = 0; i < chatMsgs.length; i++) {
-    const m = chatMsgs[i];
+  let lastUserMsg = '';
+  for (let i = rawMsgs.length - 1; i >= 0; i--) {
+    if (rawMsgs[i].role === 'user' && rawMsgs[i].content) {
+      lastUserMsg = rawMsgs[i].content!;
+      break;
+    }
+  }
+
+  const memHooks: MemoryHooks = {
+    injectMemories: (messages, query) => {
+      const recallResult = xmemory.recall(query, 5, 2);
+      if (recallResult.length === 0 && xmemory.getPreferences().filter(p => p.confidence >= 4).length === 0) {
+        return messages;
+      }
+      const memoryLines: string[] = [];
+      const prefPrompt = xmemory.getPreferencesPrompt(1000);
+      if (prefPrompt) memoryLines.push(prefPrompt);
+      const hints = xmemory.getProceduralHints(query, 3);
+      if (hints) memoryLines.push(hints);
+      const patterns = xmemory.getPatterns().slice(0, 3);
+      if (patterns.length > 0) {
+        memoryLines.push('[高频模式]\n' + patterns.map(p => `- ${p.description} (${p.frequency}次)`).join('\n'));
+      }
+      if (memoryLines.length > 0) {
+        const sysIdx = messages.findIndex(m => m.role === 'system');
+        const memText = `[XMemory 增强]\n${memoryLines.join('\n')}`;
+        if (sysIdx >= 0) {
+          messages[sysIdx] = { ...messages[sysIdx], content: (messages[sysIdx].content || '') + '\n' + memText };
+        } else {
+          messages.unshift({ role: 'system', content: memText });
+        }
+      }
+      return messages;
+    },
+    learnFromInteraction: (query, assistantContent, toolCalls) => {
+      if (assistantContent) {
+        xmemory.storeEpisodic(`[Q] ${query.slice(0, 150)} → [A] ${assistantContent.slice(0, 300)}`, ['interaction', 'api'], 4);
+        xmemory.reinforceByContent(`[Q] ${query.slice(0, 150)}`, 'positive');
+      }
+      const toolNames = toolCalls.map(t => t.name).filter(Boolean);
+      if (toolNames.length > 0) {
+        xmemory.storeWorking(`调用工具: ${toolNames.join(', ')} (${toolNames.length}个)`, ['api', 'tools']);
+      }
+      if (toolCalls.length >= 3) {
+        try {
+          const recentMsgs = [query];
+          const recentTools = toolNames;
+          xmemory.autoLearn(recentMsgs, [assistantContent.slice(0, 500)], recentTools);
+        } catch {}
+      }
+    },
+  };
+
+  const client = new DeepSeekClient({
+    apiKey: opts.apiKey || '',
+    model: opts.model || 'deepseek-chat',
+    baseUrl: opts.baseUrl || 'https://api.deepseek.com',
+    temperature: opts.temperature ?? 0,
+    maxTokens: cmt,
+    think: { enabled: opts.thinkEnabled ?? true, budgetTokens: Math.min(cmt, opts.thinkBudget || 16000) },
+    signal,
+  }, memHooks);
+
+  for (let i = 0; i < rawMsgs.length; i++) {
+    const m = rawMsgs[i];
     if (m.role === 'tool' && !m.name) {
       m.name = m.tool_call_id || 'tool';
     }
@@ -1679,11 +1856,11 @@ async function callApi(
       m.name = 'assistant';
     }
   }
-  const stream = await client.chatStream(chatMsgs, tools.map(t => ({
+  const stream = await client.chatStream(rawMsgs, tools.map(t => ({
     name: t.function.name,
     description: t.function.description,
     category: '',
     parameters: t.function.parameters as unknown as import('../tools/tool-types.js').JSONSchema,
-  })));
+  })), undefined, lastUserMsg);
   return stream;
 }

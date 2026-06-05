@@ -149,7 +149,7 @@ DeeperCode v${DEEPER_VERSION} - 一句话生成完整项目的 AI Agentic CLI �
 选项:
   -h, --help            显示帮助信息
   -v, --version         显示版本号
-  -m, --model <model>   指定模型 (默认: deepseek-v4-pro, 可选: v4-flash)
+  -m, --model <model>   指定模型 (默认: deepseek-v4-pro, /model 查看全部)
   -k, --api-key <key>   指定 API Key
   --verbose             详细输出模式
   --auto-run <task>     自动运行任务后进入 REPL
@@ -168,9 +168,16 @@ DeeperCode v${DEEPER_VERSION} - 一句话生成完整项目的 AI Agentic CLI �
   deeper mcp remove <name>        移除 MCP 服务器
 
 环境变量:
-  DEEPSEEK_API_KEY    DeepSeek API Key
-  DEEPER_HOME         DeeperCode 数据目录 (默认: ~/.deeper)
-  DEEPER_MODEL        默认模型名称
+  DEEPSEEK_API_KEY     DeepSeek API Key
+  SILICONFLOW_API_KEY  SiliconFlow API Key
+  DEEPER_HOME          DeeperCode 数据目录 (默认: ~/.deeper)
+  DEEPER_MODEL         默认模型名称
+
+示例:
+  deeper config set api_key "sk-xxx"            设置 DeepSeek Key
+  deeper config set siliconflow_api_key "sk-xxx" 设置 SiliconFlow Key
+  deeper config set model "zai-org/GLM-4.5-Air"   切换到 GLM-4.5-Air
+  deeper config set model "deepseek-v4-pro"       切换回 DeepSeek V4 Pro
 
 内存:
   如遇 OOM，使用 node --max-old-space-size=4096 $(which deeper) 启动

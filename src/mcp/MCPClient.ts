@@ -292,7 +292,7 @@ export class MCPClient {
     requestId: number,
     method: string,
     params: Record<string, unknown>,
-    timeoutMs: number = 30000,
+    timeoutMs: number = 120000,
   ): Promise<JSONRPCResponse> {
     const request = {
       jsonrpc: '2.0' as const,

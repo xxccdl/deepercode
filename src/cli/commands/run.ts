@@ -1,5 +1,6 @@
-import { loadConfig } from '../../core/config.ts';
+import { loadConfig, getApiKey } from '../../core/config.ts';
 import { bootstrap } from '../bootstrap.ts';
+import { getModelBaseUrl } from '../../core/constants.js';
 import type { DeeperConfig } from '../../core/config.ts';
 
 interface RunOptions {
@@ -24,35 +25,41 @@ export async function run(task: string, opts: RunOptions = {}): Promise<void> {
     process.exit(1);
   }
 
-  const config = opts.model || opts.apiKey
-    ? { ...result.config, ...(opts.model ? { model: opts.model } : {}), ...(opts.apiKey ? { apiKey: opts.apiKey } : {}) }
-    : result.config;
+  const config: DeeperConfig = {
+    ...result.config,
+    ...(opts.model ? { model: opts.model } : {}),
+    ...(opts.apiKey ? { apiKey: opts.apiKey } : {}),
+  };
 
-  if (!config.apiKey && !process.env.DEEPSEEK_API_KEY) {
-    console.error('❌ 未设置 API Key');
-    console.error('   请设置环境变量 DEEPSEEK_API_KEY 或使用 --api-key 参数');
+  const apiKey = opts.apiKey || getApiKey();
+
+  if (!apiKey) {
+    console.error('❌ 未设置 API Key (set DEEPSEEK_API_KEY=sk-... 或 SILICONFLOW_API_KEY=sk-...)');
     process.exit(1);
   }
 
+  const model = config.model;
+  const modelBaseUrl = getModelBaseUrl(model);
+  const baseUrl = (config.baseUrl && config.baseUrl !== 'https://api.deepseek.com') ? config.baseUrl : modelBaseUrl;
+
   console.log(`\n🚀 DeeperCode 执行任务\n`);
   console.log(`📋 任务: ${task}`);
-  console.log(`🤖 模型: ${config.model}`);
-  console.log(`🔗 API: ${config.baseUrl}`);
+  console.log(`🤖 模型: ${model}`);
+  console.log(`🔗 API: ${baseUrl}`);
   console.log();
 
-  console.log('⏳ 正在连接 DeepSeek API...');
+  console.log('⏳ 正在连接 API...');
   console.log();
 
   try {
-    const apiKey = config.apiKey || process.env.DEEPSEEK_API_KEY || '';
-    const response = await fetch(`${config.baseUrl}/v1/chat/completions`, {
+    const response = await fetch(`${baseUrl}/v1/chat/completions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${apiKey}`,
       },
       body: JSON.stringify({
-        model: config.model,
+        model,
         messages: [
           {
             role: 'system',
@@ -107,8 +114,8 @@ export async function run(task: string, opts: RunOptions = {}): Promise<void> {
           const parsed = JSON.parse(data);
           const delta = parsed.choices?.[0]?.delta;
 
-          if (delta?.thinking) {
-            thinkingContent += delta.thinking;
+          if (delta?.thinking || delta?.reasoning_content) {
+            thinkingContent += delta.thinking || delta.reasoning_content || '';
           }
 
           if (delta?.content) {

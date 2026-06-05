@@ -1,158 +1,211 @@
-import { SkillRegistry } from './SkillRegistry.js';
-import { SkillLoader } from './SkillLoader.js';
-import { SkillExecutor } from './SkillExecutor.js';
-import { SkillCreator } from './SkillCreator.js';
-import { SkillTrigger } from './SkillTrigger.js';
-import { EventBus, Events } from '../core/eventbus.js';
-import type { Skill, SkillExecutionResult } from './types.js';
+import { readdirSync, existsSync, readFileSync, statSync } from 'node:fs';
+import { join } from 'node:path';
+import { DEEPER_SKILLS_DIR, PROJECT_SKILLS_DIR } from '../core/constants.js';
+
+interface SkillDef {
+  name: string;
+  description: string;
+  version: string;
+  triggers: string[];
+  content: string;
+  path: string;
+  source: 'global' | 'project';
+  enabled: boolean;
+}
+
+interface SkillMeta {
+  name: string;
+  description: string;
+  triggers: string[];
+  enabled: boolean;
+  source: 'global' | 'project';
+}
 
 export class SkillEngine {
-  private registry: SkillRegistry;
-  private loader: SkillLoader;
-  private executor: SkillExecutor;
-  private creator: SkillCreator;
-  private trigger: SkillTrigger;
-  private eventbus: EventBus;
+  private skills: SkillDef[] = [];
+  private activeTriggers: Map<string, SkillDef[]> = new Map();
 
-  constructor(eventbus?: EventBus) {
-    this.registry = new SkillRegistry();
-    this.loader = new SkillLoader();
-    this.executor = new SkillExecutor();
-    this.creator = new SkillCreator();
-    this.trigger = new SkillTrigger(this.registry);
-    this.eventbus = eventbus || new EventBus();
-  }
-
-  getRegistry(): SkillRegistry {
-    return this.registry;
-  }
-
-  getLoader(): SkillLoader {
-    return this.loader;
-  }
-
-  getTrigger(): SkillTrigger {
-    return this.trigger;
-  }
+  constructor() {}
 
   async loadAll(): Promise<number> {
-    const results = await this.loader.loadAll();
-    let count = 0;
+    this.skills = [];
+    this.activeTriggers.clear();
 
-    for (const result of results) {
-      this.registry.register(result.skill);
-      count++;
-      this.eventbus.emit(Events.SKILL_LOADED, {
-        name: result.skill.meta.name,
-        source: result.source,
-        hasCode: !!result.skill.code,
-      });
+    const dirs = [
+      { dir: DEEPER_SKILLS_DIR, source: 'global' as const },
+      { dir: join(process.cwd(), PROJECT_SKILLS_DIR), source: 'project' as const },
+    ];
+
+    for (const { dir, source } of dirs) {
+      if (!existsSync(dir)) continue;
+      try {
+        const entries = readdirSync(dir, { withFileTypes: true });
+        for (const entry of entries) {
+          if (!entry.isDirectory()) continue;
+          const mdFile = join(dir, entry.name, 'skill.md');
+          if (!existsSync(mdFile)) continue;
+
+          const skill = this.parseSkillFile(mdFile, source);
+          if (skill) {
+            this.skills.push(skill);
+            for (const trigger of skill.triggers) {
+              const t = trigger.toLowerCase();
+              if (!this.activeTriggers.has(t)) this.activeTriggers.set(t, []);
+              this.activeTriggers.get(t)!.push(skill);
+            }
+          }
+        }
+      } catch {}
     }
 
-    return count;
+    this.skills.sort((a, b) => {
+      if (a.source !== b.source) return a.source === 'project' ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    });
+
+    return this.skills.length;
   }
 
-  async reload(): Promise<number> {
-    this.registry.clear();
-    return this.loadAll();
-  }
-
-  async execute(name: string, context: Record<string, unknown>): Promise<SkillExecutionResult> {
-    const skill = this.registry.get(name);
-    if (!skill) {
-      return {
-        success: false,
-        output: '',
-        error: `Skill not found: ${name}`,
-        duration: 0,
-      };
-    }
-
-    const startTime = Date.now();
+  private parseSkillFile(filePath: string, source: 'global' | 'project'): SkillDef | null {
     try {
-      const result = await this.executor.execute(skill, context);
-      const duration = Date.now() - startTime;
+      const raw = readFileSync(filePath, 'utf-8');
+      const match = raw.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
+      if (!match) {
+        if (raw.trim()) {
+          return {
+            name: filePath.split(/[\\/]/).slice(-2, -1)[0] || 'unnamed',
+            description: '',
+            version: '1.0.0',
+            triggers: [],
+            content: raw.trim(),
+            path: filePath,
+            source,
+            enabled: true,
+          };
+        }
+        return null;
+      }
 
-      this.eventbus.emit(Events.SKILL_EXECUTED, {
-        name: skill.meta.name,
-        success: result.success,
-        duration,
-      });
+      const yamlStr = match[1];
+      const body = match[2].trim();
+      const meta = this.parseYaml(yamlStr);
 
-      return { ...result, duration };
-    } catch (error) {
-      const duration = Date.now() - startTime;
-      const errMsg = error instanceof Error ? error.message : String(error);
       return {
-        success: false,
-        output: '',
-        error: errMsg,
-        duration,
+        name: meta.name || '',
+        description: meta.description || '',
+        version: meta.version || '1.0.0',
+        triggers: meta.triggers || [],
+        content: body,
+        path: filePath,
+        source,
+        enabled: true,
       };
+    } catch {
+      return null;
     }
   }
 
-  async createSkill(
-    name: string,
-    description: string,
-    content: string,
-    code?: string,
-  ): Promise<Skill> {
-    const skill = await this.creator.create({
-      meta: {
-        name,
-        description,
-        version: '1.0.0',
-        author: 'DeeperCode AI',
-        triggers: [],
-        tools: [],
-        dependencies: [],
-      },
-      content,
-      code,
-    });
+  private parseYaml(yaml: string): Record<string, any> {
+    const result: Record<string, any> = {};
+    let currentKey = '';
+    let currentList: string[] = [];
 
-    this.registry.register(skill);
+    for (const line of yaml.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
 
-    this.eventbus.emit(Events.SKILL_CREATED, {
-      name: skill.meta.name,
-      description: skill.meta.description,
-    });
-
-    return skill;
-  }
-
-  matchTriggers(input: string): Skill[] {
-    const matches = this.trigger.match(input);
-    for (const skill of matches) {
-      this.eventbus.emit(Events.SKILL_TRIGGERED, {
-        name: skill.meta.name,
-        input: input.slice(0, 100),
-      });
-    }
-    return matches;
-  }
-
-  getSystemPrompt(context?: Record<string, unknown>): string {
-    const allSkills = this.registry.getAll();
-    if (allSkills.length === 0) return '';
-
-    let prompt = 'Available Skills:\n\n';
-    for (const skill of allSkills) {
-      prompt += `## ${skill.meta.name} (v${skill.meta.version})\n`;
-      prompt += `${skill.meta.description}\n`;
-
-      if (skill.meta.triggers.length > 0) {
-        prompt += `Triggers: ${skill.meta.triggers.join(', ')}\n`;
+      const listMatch = trimmed.match(/^-\s+(.+)$/);
+      if (listMatch && currentKey) {
+        currentList.push(listMatch[1]);
+        continue;
       }
 
-      prompt += `---\n${skill.content.slice(0, 1000)}\n`;
-      if (skill.content.length > 1000) {
-        prompt += '...(truncated)\n';
+      if (currentKey && currentList.length > 0) {
+        result[currentKey] = currentList;
+        currentList = [];
+        currentKey = '';
       }
-      prompt += '\n';
+
+      const kvMatch = trimmed.match(/^([a-zA-Z_][a-zA-Z0-9_]*):\s*(.*)$/);
+      if (kvMatch) {
+        currentKey = kvMatch[1];
+        const value = kvMatch[2].trim();
+        result[currentKey] = value || '';
+      }
     }
 
-    return prompt;
+    if (currentKey && currentList.length > 0) {
+      result[currentKey] = currentList;
+    }
+
+    return result;
   }
+
+  getSystemPrompt(): string {
+    if (this.skills.length === 0) return '';
+    const parts: string[] = [];
+    parts.push(`[已加载 ${this.skills.length} Skills]`);
+
+    for (const skill of this.skills) {
+      const loc = skill.source === 'project' ? 'Project' : 'Global';
+      const triggerStr = skill.triggers.length > 0 ? `(触发: ${skill.triggers.join(', ')})` : '';
+      parts.push(
+        `## Skill: ${skill.name} [${loc}] ${triggerStr}\n${skill.description}\n\n${skill.content.slice(0, 2000)}`
+      );
+    }
+
+    return parts.join('\n\n');
+  }
+
+  getActiveSkills(userInput: string): SkillDef[] {
+    const input = userInput.toLowerCase();
+    const active = new Set<SkillDef>();
+
+    for (const [trigger, skills] of this.activeTriggers) {
+      if (input.includes(trigger)) {
+        for (const s of skills) active.add(s);
+      }
+    }
+
+    for (const skill of this.skills) {
+      if (skill.triggers.length === 0 && skill.source === 'project') {
+        active.add(skill);
+      }
+    }
+
+    return [...active];
+  }
+
+  getActivePrompt(userInput: string, maxTokens = 3000): string {
+    const active = this.getActiveSkills(userInput);
+    if (active.length === 0) return '';
+
+    const parts: string[] = [];
+    parts.push(`[匹配 ${active.length} Skills]`);
+
+    let used = 0;
+    const budget = maxTokens * 3;
+    for (const skill of active) {
+      const text = `## ${skill.name}: ${skill.description}\n${skill.content.slice(0, 800)}`;
+      if (used + text.length > budget) break;
+      parts.push(text);
+      used += text.length;
+    }
+
+    return parts.join('\n\n');
+  }
+
+  list(): SkillMeta[] {
+    return this.skills.map(s => ({
+      name: s.name,
+      description: s.description,
+      triggers: s.triggers,
+      enabled: s.enabled,
+      source: s.source,
+    }));
+  }
+
+  getCount(): number { return this.skills.length; }
+
+  reload(): Promise<number> { return this.loadAll(); }
 }

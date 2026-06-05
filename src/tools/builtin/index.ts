@@ -108,6 +108,7 @@ import { token_count } from './ai/token_count.js';
 import { context_summarize } from './ai/context_summarize.js';
 import { prompt_template } from './ai/prompt_template.js';
 import { skill_create } from './ai/skill_create.js';
+import { rules_manager } from './ai/rules_manager.js';
 import { tool_create } from './ai/tool_create.js';
 import { memory_store } from './ai/memory_store.js';
 import { todo_manager } from './ai/todo_manager.js';
@@ -230,6 +231,7 @@ export const builtinTools: Tool[] = [
   context_summarize,
   prompt_template,
   skill_create,
+  rules_manager,
   tool_create,
   memory_store,
   todo_manager,

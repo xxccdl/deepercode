@@ -22,7 +22,7 @@ export class StdioTransport implements MCPTransport {
     this.process = spawn(config.command, config.args || [], {
       stdio: ['pipe', 'pipe', 'pipe'],
       env,
-      shell: true,
+      shell: config.shell ?? true,
       cwd: config.cwd,
     });
 
@@ -47,7 +47,10 @@ export class StdioTransport implements MCPTransport {
           handler(message);
         }
       } catch {
-        // MCP stderr is for logging, not JSON-RPC
+        // MCP stderr is for logging — show first few lines for debugging
+        if (process.env.DEEPER_DEBUG) {
+          process.stderr.write(`[MCP ${config.name} stderr] ${text}`);
+        }
       }
     });
 
